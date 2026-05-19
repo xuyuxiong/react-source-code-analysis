@@ -4,6 +4,7 @@ import { defineConfig } from 'vitepress'
 export default defineConfig({
   title: 'React 源码深度解析',
   description: 'React 18/19 源码深度解析 - 从理念到架构到实现',
+  base: '/react-source-code-analysis/',
   
   head: [
     ['link', { rel: 'icon', href: '/favicon.ico' }],
