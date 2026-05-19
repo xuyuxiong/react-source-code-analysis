@@ -1,0 +1,26 @@
+{
+  "name": "react-source-code-analysis",
+  "version": "1.0.0",
+  "description": "React 18/19 源码深度解析 - 从理念到架构到实现",
+  "type": "module",
+  "scripts": {
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs"
+  },
+  "keywords": [
+    "react",
+    "react18",
+    "react19",
+    "source-code",
+    "fiber",
+    "concurrent",
+    "javascript"
+  ],
+  "author": "see IDENTITY.md",
+  "license": "MIT",
+  "devDependencies": {
+    "vitepress": "^1.0.0",
+    "vue": "^3.4.0"
+  }
+}
