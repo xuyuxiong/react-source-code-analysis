@@ -127,21 +127,43 @@ React 19 新特性详解，包括 Compiler、Actions 等
 .btn-get-started {
   display: inline-flex;
   align-items: center;
-  gap: 6px;
-  background: transparent;
-  color: var(--vp-c-brand);
+  gap: 8px;
+  background: linear-gradient(135deg, var(--vp-c-brand) 0%, var(--vp-c-brand-dark) 100%);
+  color: #fff;
   font-size: 16px;
-  font-weight: 500;
+  font-weight: 600;
   text-decoration: none;
-  padding: 10px 16px;
-  border: 2px solid var(--vp-c-brand);
-  border-radius: 8px;
-  transition: all 0.3s ease;
+  padding: 14px 28px;
+  border: none;
+  border-radius: 12px;
+  box-shadow: 0 4px 12px rgba(var(--vp-c-brand-rgb), 0.3);
+  transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  position: relative;
+  overflow: hidden;
+}
+
+.btn-get-started::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: -100%;
+  width: 100%;
+  height: 100%;
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+  transition: left 0.5s;
 }
 
 .btn-get-started:hover {
-  background: var(--vp-c-brand);
-  color: #fff;
-  transform: translateX(4px);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(var(--vp-c-brand-rgb), 0.4);
+}
+
+.btn-get-started:hover::before {
+  left: 100%;
+}
+
+.btn-get-started:active {
+  transform: translateY(0);
+  box-shadow: 0 2px 8px rgba(var(--vp-c-brand-rgb), 0.3);
 }
 </style>
