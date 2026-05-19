@@ -61,10 +61,15 @@ features:
 
 ```mermaid
 graph LR
-    A[指南篇<br/>入门准备] --> B[理念篇<br/>理解设计思想]
-    B --> C[架构篇<br/>掌握整体结构]
-    C --> D[实现篇<br/>深入源码细节]
-    D --> E[React 19<br/>跟进最新特性]
+    A["指南篇
+    入门准备"] --> B["理念篇
+    理解设计思想"]
+    B --> C["架构篇
+    掌握整体结构"]
+    C --> D["实现篇
+    深入源码细节"]
+    D --> E["React 19
+    跟进最新特性"]
 ```
 
 ## 📋 内容概览
@@ -101,7 +106,9 @@ React 19 新特性详解，包括 Compiler、Actions 等
 - 🎮 **可交互 Demo**：边学边练
 - 📱 **现代化体验**：响应式设计、暗色模式
 
-[开始学习](/guide/prerequisites){.btn-brand}
+<div class="action-buttons">
+  <a href="/guide/prerequisites" class="btn-get-started">→ 开始学习</a>
+</div>
 
 <style>
 .why-learn {
@@ -111,17 +118,30 @@ React 19 新特性详解，包括 Compiler、Actions 等
   margin: 24px 0;
 }
 
-.btn-brand {
-  display: inline-block;
-  background: var(--vp-button-brand-bg);
-  color: var(--vp-button-brand-text);
-  padding: 8px 20px;
-  border-radius: 4px;
-  text-decoration: none;
-  margin-top: 16px;
+.action-buttons {
+  margin-top: 32px;
+  padding-top: 32px;
+  border-top: 1px solid var(--vp-c-divider);
 }
 
-.btn-brand:hover {
-  background: var(--vp-button-brand-hover-bg);
+.btn-get-started {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  color: var(--vp-c-brand);
+  font-size: 16px;
+  font-weight: 500;
+  text-decoration: none;
+  padding: 10px 16px;
+  border: 2px solid var(--vp-c-brand);
+  border-radius: 8px;
+  transition: all 0.3s ease;
+}
+
+.btn-get-started:hover {
+  background: var(--vp-c-brand);
+  color: #fff;
+  transform: translateX(4px);
 }
 </style>

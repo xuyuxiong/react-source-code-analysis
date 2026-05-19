@@ -475,5 +475,5 @@ console.warn('Warning: Text content did not match. Server: ":r0:" Client: ":r1:"
 
 ## 📖 下一步
 
-- [useSyncExternalStore 实现](./use-sync)
+- [useSyncExternalStore 实现](./use-sync-external-store)
 - [Suspense 实现](./suspense)

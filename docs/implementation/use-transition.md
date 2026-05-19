@@ -561,5 +561,5 @@ function Page() {
 
 ## 📖 下一步
 
-- [useDeferredValue 实现](./use-deferred)
+- [useDeferredValue 实现](./deferred)
 - [Automatic Batching](./batching)

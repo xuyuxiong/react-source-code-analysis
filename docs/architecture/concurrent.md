@@ -456,4 +456,4 @@ performance.measure(
 ## 📖 下一步
 
 - [Suspense 架构](./suspense) - 深入了解 Suspense
-- [实现篇：useTransition](../implementation/transition)
+- [实现篇：useTransition](../implementation/use-transition)
