@@ -14,7 +14,7 @@ hero:
       link: /guide/prerequisites
     - theme: alt
       text: GitHub
-      link: https://github.com/yuxiongxu.xyx/react-source-code-analysis
+      link: https://github.com/xuyuxiong/react-source-code-analysis
 
 features:
   - icon: 🚀

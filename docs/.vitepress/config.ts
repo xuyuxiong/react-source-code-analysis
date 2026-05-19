@@ -126,7 +126,7 @@ export default defineConfig({
     },
 
     socialLinks: [
-      { icon: 'github', link: 'https://github.com/yuxiongxu.xyx/react-source-code-analysis' },
+      { icon: 'github', link: 'https://github.com/xuyuxiong/react-source-code-analysis' },
     ],
 
     footer: {

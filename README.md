@@ -2,7 +2,7 @@
 
 > React 18/19 完整源码学习指南 - 从理念到架构到实现
 
-[![Status](https://img.shields.io/badge/status-complete-brightgreen)](https://github.com/yuxiongxu.xyx/react-source-code-analysis)
+[![Status](https://img.shields.io/badge/status-complete-brightgreen)](https://github.com/xuyuxiong/react-source-code-analysis)
 [![React](https://img.shields.io/badge/React-18/19-61dafb)](https://react.dev)
 [![License](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
@@ -18,7 +18,7 @@
 - 🎮 **可交互 Demo**：边学边练
 - 📱 **现代化体验**：响应式设计、暗色模式
 
-👉 **在线阅读**：[https://yuxiongxu.xyx.github.io/react-source-code-analysis/](https://yuxiongxu.xyx.github.io/react-source-code-analysis/)
+👉 **在线阅读**：[https://xuyuxiong.github.io/react-source-code-analysis/](https://xuyuxiong.github.io/react-source-code-analysis/)
 
 ---
 
@@ -110,7 +110,7 @@
 
 ```bash
 # 克隆项目
-git clone https://github.com/yuxiongxu.xyx/react-source-code-analysis.git
+git clone https://github.com/xuyuxiong/react-source-code-analysis.git
 cd react-source-code-analysis
 
 # 安装依赖
@@ -205,7 +205,7 @@ graph LR
 
 ## 👋 关于作者
 
-本项目由 [yuxiongxu.xyx](https://github.com/yuxiongxu.xyx) 创作并维护。
+本项目由 [xuyuxiong](https://github.com/xuyuxiong) 创作并维护。
 
 如果你从中受益，欢迎给项目一个 ⭐ Star！
 
