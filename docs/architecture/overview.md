@@ -233,13 +233,37 @@ Current Tree (当前显示)    WorkInProgress Tree (内存中构建)
 ### Lane 优先级模型
 
 ```javascript
-//  lane 是二进制位，可以组合
-const SyncLane = 0b0000000000000000000000000000001;
-const InputContinuousLane = 0b0000000000000000000000000000100;
-const DefaultLane = 0b0000000000000000000000000010000;
-const TransitionLanes = 0b0000000001111111111111111100000;
-const IdleLanes = 0b1111111110000000000000000000000;
-const NoLanes = 0b0000000000000000000000000000000;
+// packages/react-reconciler/src/ReactFiberLane.js
+export const NoLanes: Lanes = /*                        */ 0b0000000000000000000000000000000;
+export const NoLane: Lane = /*                          */ 0b0000000000000000000000000000000;
+
+export const SyncHydrationLane: Lane = /*               */ 0b0000000000000000000000000000001;
+export const SyncLane: Lane = /*                        */ 0b0000000000000000000000000000010;
+export const SyncLaneIndex: number = 1;
+
+export const InputContinuousHydrationLane: Lane = /*    */ 0b0000000000000000000000000000100;
+export const InputContinuousLane: Lane = /*             */ 0b0000000000000000000000000001000;
+
+export const DefaultHydrationLane: Lane = /*            */ 0b0000000000000000000000000010000;
+export const DefaultLane: Lane = /*                     */ 0b0000000000000000000000000100000;
+
+export const GestureLane: Lane = /*                     */ 0b0000000000000000000000001000000;
+
+const TransitionHydrationLane: Lane = /*                */ 0b0000000000000000000000010000000;
+const TransitionLanes: Lanes = /*                       */ 0b0000000001111111111111100000000;
+const TransitionLane1: Lane = /*                        */ 0b0000000000000000000000100000000;
+const TransitionLane2: Lane = /*                        */ 0b0000000000000000000001000000000;
+// ... 更多 Transition lanes
+
+const RetryLanes: Lanes = /*                            */ 0b0000011110000000000000000000000;
+
+export const SelectiveHydrationLane: Lane = /*          */ 0b0000100000000000000000000000000;
+
+export const IdleHydrationLane: Lane = /*               */ 0b0001000000000000000000000000000;
+export const IdleLane: Lane = /*                        */ 0b0010000000000000000000000000000;
+
+export const OffscreenLane: Lane = /*                   */ 0b0100000000000000000000000000000;
+export const DeferredLane: Lane = /*                    */ 0b1000000000000000000000000000000;
 ```
 
 ---

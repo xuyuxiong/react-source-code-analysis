@@ -16,6 +16,7 @@ packages/react-reconciler/src/
 ```javascript
 // packages/react-reconciler/src/ReactFiberHooks.js
 
+// useRef 返回的对象结构
 type RefObject = {
   current: any,  // 当前值（可变）
 };
@@ -23,6 +24,9 @@ type RefObject = {
 // Hook 中存储
 type Hook = {
   memoizedState: RefObject,  // ref 对象
+  baseState: any,
+  baseQueue: Update<any>,
+  queue: UpdateQueue<any>,
   next: Hook,
 };
 ```
@@ -37,14 +41,14 @@ type Hook = {
    useRef → current → 任意值（不触发渲染）
 ```
 
-## 🔬 mountRef
+## 🔬 useRef 实现
 
-### 创建 Ref Hook
+### mountRef（首次渲染）
 
 ```javascript
 // packages/react-reconciler/src/ReactFiberHooks.js
 
-function mountRef<T>(initialValue: T): RefObject {
+function mountRef<T>(initialValue: T): {current: T} {
   // 1. 创建 Hook
   const hook = mountWorkInProgressHook();
   
@@ -58,12 +62,10 @@ function mountRef<T>(initialValue: T): RefObject {
 }
 ```
 
-## 🔬 updateRef
-
-### 更新 Ref Hook
+### updateRef（更新渲染）
 
 ```javascript
-function updateRef<T>(initialValue: T): RefObject {
+function updateRef<T>(initialValue: T): {current: T} {
   // 1. 获取当前 Hook
   const hook = updateWorkInProgressHook();
   
@@ -87,14 +89,14 @@ function Component() {
 }
 ```
 
-## 🔗 DOM Ref 附加
+## 🔗 DOM Ref 附加流程
 
-### commitAttachRef
+### commitAttachRef（挂载时）
 
 ```javascript
 // packages/react-reconciler/src/ReactFiberCommitWork.js
 
-function commitAttachRef(finishedWork) {
+function commitAttachRef(finishedWork: Fiber) {
   const ref = finishedWork.ref;
   
   if (ref !== null) {
@@ -111,10 +113,10 @@ function commitAttachRef(finishedWork) {
 }
 ```
 
-### safelyDetachRef（卸载）
+### safelyDetachRef（卸载时）
 
 ```javascript
-function safelyDetachRef(finishedWork) {
+function safelyDetachRef(finishedWork: Fiber) {
   const ref = finishedWork.ref;
   
   if (ref !== null) {
@@ -129,7 +131,7 @@ function safelyDetachRef(finishedWork) {
 }
 ```
 
-## 🔄 完整流程
+## 🔄 完整流程图
 
 ```mermaid
 graph TD
@@ -165,7 +167,7 @@ function FocusInput() {
   
   useEffect(() => {
     // DOM 挂载后聚焦
-    inputRef.current.focus();
+    inputRef.current?.focus();
   }, []);
   
   return <input ref={inputRef} />;
@@ -247,12 +249,12 @@ function Timer() {
 ### 5. 前一个值
 
 ```jsx
-function usePrevious(value) {
-  const ref = useRef();
+function usePrevious<T>(value: T): T | void {
+  const ref = useRef<T>();
   
   useEffect(() => {
     ref.current = value;
-  }, [value]);
+  });
   
   return ref.current;  // 返回上次的值
 }
@@ -351,7 +353,7 @@ function Component() {
 }
 ```
 
-### 3. StrictMode 双重触发
+### 3. React 18 StrictMode 双重触发
 
 ```jsx
 // React 18 StrictMode 下，回调 ref 会触发两次
@@ -408,44 +410,29 @@ const [isOpen, setIsOpen] = useState(false);
 
 ### 追踪 ref 变化
 
-```jsx
-function TrackedRef(initialValue, name) {
-  const ref = useRef(initialValue);
+```javascript
+// 开发工具中查看 ref
+function Component() {
+  const ref = useRef(0);
   
   useEffect(() => {
-    console.log(`${name}.current changed:`, {
-      old: ref.current,
-      new: initialValue,
-    });
+    console.log('Ref current:', ref.current);
   });
   
-  // 拦截 setter
-  return new Proxy(ref, {
-    get(target, prop) {
-      const value = target[prop];
-      if (prop === 'current') {
-        console.log(`Reading ${name}.current:`, value);
-      }
-      return value;
-    },
-    set(target, prop, value) {
-      target[prop] = value;
-      if (prop === 'current') {
-        console.log(`Setting ${name}.current:`, value);
-      }
-      return true;
-    },
-  });
+  return (
+    <button onClick={() => ref.current++}>
+      Ref: {ref.current}
+    </button>
+  );
 }
 
-// 使用
-function Component() {
-  const ref = TrackedRef(0, 'countRef');
-  ref.current = 1;  // 会打印日志
-}
+// 在 React DevTools 中查看：
+// 1. 选择组件
+// 2. 查看 Hooks 面板
+// 3. 可以看到 ref.current 的值
 ```
 
-### 检查 ref 泄露
+### 检查 ref 清理
 
 ```javascript
 // 组件卸载时检查 ref 是否清理
@@ -499,6 +486,17 @@ class Parent extends React.Component {
     return <Child ref={this.childRef} />;
   }
 }
+```
+
+### Q: 为什么 useRef 在 StrictMode 下会触发两次？
+
+**A**: React 18 StrictMode 会双重调用函数帮助检测副作用。
+
+```jsx
+const ref = useCallback(element => {
+  console.log('Ref callback:', element);
+  // 在 StrictMode 下会触发两次
+}, []);
 ```
 
 ---

@@ -1,6 +1,6 @@
 # useContext 实现
 
-useContext 是 React Context API 的 Hook 形式，用于消费 Context 值。
+useContext 是 React Context API 的 Hook 形式，用于消费 Context 值。它通过依赖收集机制实现高效的更新传播。
 
 ## 📦 模块位置
 
@@ -19,202 +19,204 @@ packages/react-reconciler/src/
 
 type ReactContext<T> = {
   $$typeof: symbol,
-  _currentValue: T,           // 当前值
-  _currentValue2: T,          // 双缓冲（并发渲染）
-  _threadCount: number,       // 线程计数
+  _currentValue: T,           // 当前值（当前渲染树）
+  _currentValue2: T,          // 当前值（备用渲染树，用于并发）
+  _threadCount: number,       // 并发线程计数
   Provider: ReactProviderType<T>,
   Consumer: ReactContext<T>,
+  _currentRenderer?: Object | null,   // 渲染器标识
+  _currentRenderer2?: Object | null,  // 备用渲染器标识
 };
-```
 
-### Provider
-
-```javascript
+// Provider 类型
 type ReactProviderType<T> = {
   $$typeof: symbol,
   _context: ReactContext<T>,
 };
-
-// JSX 中使用时
-<Context.Provider value={value}>
-  {children}
-</Context.Provider>
 ```
 
 ### Context Dependency
 
 ```javascript
 // Hook 中存储的依赖
-type ContextDependency = {
-  context: ReactContext<any>,
-  observedBits: number,
-  next: ContextDependency<any>,
+type ContextDependency<T> = {
+  context: ReactContext<T>,
+  observedBits: number,      // 已废弃，始终为全量
+  next: ContextDependency<T>,
+};
+
+// Fiber 的 dependencies 结构
+type Dependencies = {
+  lanes: Lanes,              // 待处理的更新车道
+  firstContext: ContextDependency<mixed> | null,  // 第一个依赖
 };
 ```
 
 ## 🔬 useContext 实现
 
-### readContext
+### readContext（核心读取逻辑）
 
 ```javascript
 // packages/react-reconciler/src/ReactFiberNewContext.js
 
-function readContext<T>(context: Context<T>): T {
-  // 1. 检查是否在渲染阶段
-  if (didReceiveUpdate) {
-    // 优化：检查是否需要更新
-    const slotIndex = context.$$id % MAX_CONTEXT_SLOTS;
-    const previousValue = currentlyRenderingFiber.slots[slotIndex];
-    
-    if (previousValue !== null) {
-      // 检查值是否变化
-      const newValue = context._currentValue;
-      if (!Object.is(previousValue, newValue)) {
-        markWorkInProgressReceivedUpdate();
-      }
-    }
+function readContext<T>(
+  context: ReactContext<T>,
+  observedBits: void | number,
+): T {
+  // 1. 获取当前渲染的 Fiber
+  const fiber = currentlyRenderingFiber;
+  
+  if (fiber === null) {
+    // 非渲染阶段（如事件处理）
+    return context._currentValue;
   }
   
   // 2. 读取当前值
   const value = context._currentValue;
   
-  // 3. 记录依赖（用于更新时触发重新渲染）
-  if (isDisallowedContextReadInDEV) {
-    // DEV only warning
-  }
+  // 3. 创建依赖记录（用于更新时触发重新渲染）
+  const contextItem: ContextDependency<T> = {
+    context,
+    observedBits: MAX_SIGNED_31_BIT_INT,  // React 17+ 不再使用位掩码
+    next: null,
+  };
   
-  // 4. 添加依赖到 fiber
-  if (currentlyRenderingFiber !== null) {
-    // 创建依赖对象
-    const contextItem = {
-      context: context,
-      observedBits: ObservedBits.all,
-      next: null,
+  // 4. 添加到 dependencies 链表
+  if (fiber.dependencies === null) {
+    fiber.dependencies = {
+      lanes: NoLanes,
+      firstContext: contextItem,
     };
-    
-    // 添加到 dependencies 链表
-    if (currentlyRenderingFiber.dependencies === null) {
-      currentlyRenderingFiber.dependencies = {
-        lanes: NoLanes,
-        firstContext: contextItem,
-      };
-    } else {
-      // 连接到链表末尾
-      const last = currentlyRenderingFiber.dependencies.lastContext;
-      if (last === null) {
-        currentlyRenderingFiber.dependencies.firstContext = contextItem;
-      } else {
-        last.next = contextItem;
-      }
-      currentlyRenderingFiber.dependencies.lastContext = contextItem;
+  } else {
+    // 添加到链表末尾
+    let last = fiber.dependencies.firstContext;
+    while (last.next !== null) {
+      last = last.next;
     }
+    last.next = contextItem;
   }
   
   return value;
 }
 ```
 
-### useContext Hook
+### useContext Hook 实现
 
 ```javascript
 // packages/react-reconciler/src/ReactFiberHooks.js
 
 function useContext<T>(
-  Context: Context<T>,
+  Context: ReactContext<T>,
   observedBits: void | number,
 ): T {
-  // 1. 标记需要重新渲染的 lanes
-  if (disableSchedulerTimeoutInWorkLoop) {
-    markWorkInProgressReceivedUpdate();
+  // 1. 验证参数（开发模式）
+  if (__DEV__) {
+    if (observedBits !== undefined) {
+      console.error(
+        'useContext() second argument is reserved for future use in React. ' +
+          'Passing it is not supported. ' +
+          'You passed: %s.%s',
+        observedBits,
+        typeof observedBits === 'number' && Array.isArray(arguments[2])
+          ? '\n\nDid you call array.map(useContext)? ' +
+              'Calling Hooks inside a loop is not supported. ' +
+              'Learn more at https://react.dev/link/rules-of-hooks'
+          : '',
+      );
+    }
   }
   
-  // 2. 调用 readContext
-  if (currentlyRenderingFiber !== null) {
-    // 确保在渲染阶段调用
-    return readContext(Context, observedBits);
-  } else {
-    // 非渲染阶段（如事件处理）
-    return Context._currentValue;
-  }
+  // 2. 调用 readContext 读取值并记录依赖
+  return readContext(Context, observedBits);
 }
 ```
 
 ## 🔄 Context 更新流程
 
-### Context 值变化
+### Provider 值更新
 
 ```javascript
-// packages/react-react/src/ReactContext.js
+// packages/react-reconciler/src/ReactFiberBeginWork.js
 
-// Provider 渲染时更新值
-function updateContextProvider(providerType, newProps) {
-  const context = providerType._context;
+function updateContextProvider(
+  current: Fiber | null,
+  workInProgress: Fiber,
+  renderLanes: Lanes,
+) {
+  const providerType: ReactProviderType<any> = workInProgress.type;
+  const context: ReactContext<any> = providerType._context;
+  const newProps = workInProgress.pendingProps;
   const newValue = newProps.value;
   
-  // 更新当前值
+  // 1. 更新 Context 值
   context._currentValue = newValue;
   context._currentValue2 = newValue;
+  
+  // 2. 传播变化给所有消费者
+  propagateContextChange(workInProgress, context, renderLanes);
+  
+  // 3. 继续渲染子节点
+  const newChildren = newProps.children;
+  reconcileChildren(current, workInProgress, newChildren, renderLanes);
 }
 ```
 
-### 消费者更新
+### propagateContextChange（传播机制）
 
 ```javascript
 // packages/react-reconciler/src/ReactFiberNewContext.js
 
 function propagateContextChange<T>(
   workInProgress: Fiber,
-  context: Context<T>,
+  context: ReactContext<T>,
   renderLanes: Lanes,
 ): void {
-  // 1. 找到第一个消费者
+  // 1. 从 Provider 的子节点开始遍历
   let fiber = workInProgress.child;
-  
   if (fiber !== null) {
     fiber.return = workInProgress;
   }
   
-  // 2. 遍历子树，找到所有消费者
+  // 2. 深度优先遍历整个子树
   while (fiber !== null) {
-    let childFiber = fiber.child;
+    let nextFiber = null;
     
-    // 3. 检查是否有 Context 依赖
-    if (fiber.dependencies !== null) {
-      const dependencies = fiber.dependencies;
-      const firstContext = dependencies.firstContext;
+    // 3. 检查当前 Fiber 是否有 Context 依赖
+    const dependencies = fiber.dependencies;
+    if (dependencies !== null) {
+      nextFiber = fiber.child;
       
-      if (firstContext !== null) {
-        // 4. 遍历依赖链表
-        let contextItem = firstContext;
-        while (contextItem !== null) {
-          // 5. 检查是否是变化的 Context
-          if (contextItem.context === context) {
-            // 标记需要更新
-            markUpdateLaneFromFiberToRoot(fiber, renderLanes);
-            
-            // 创建新的 workInProgress
-            if (fiber.alternate === null) {
-              fiber.alternate = createWorkInProgress(fiber, fiber.pendingProps);
-            }
-            
-            // 标记更新
-            fiber.flags |= (Placement | Update);
-            
-            break;
+      // 4. 遍历依赖链表
+      let contextItem = dependencies.firstContext;
+      while (contextItem !== null) {
+        // 5. 检查是否是变化的 Context
+        if (contextItem.context === context) {
+          // 6. 标记需要更新
+          markUpdateLaneFromFiberToRoot(fiber, renderLanes);
+          
+          // 7. 确保有 workInProgress
+          if (fiber.alternate === null) {
+            fiber.alternate = createWorkInProgress(fiber, fiber.pendingProps);
           }
-          contextItem = contextItem.next;
+          
+          // 8. 标记更新标志
+          fiber.flags |= UpdateEffect;
+          
+          // 9. 继续处理子节点
+          break;
         }
+        contextItem = contextItem.next;
       }
     }
     
-    // 6. 继续遍历
-    if (childFiber !== null) {
-      childFiber.return = fiber;
-      fiber = childFiber;
+    // 10. 继续遍历
+    if (nextFiber !== null) {
+      nextFiber.return = fiber;
+      fiber = nextFiber;
     } else {
       // 向上回溯
       while (fiber !== workInProgress) {
-        let sibling = fiber.sibling;
+        const sibling = fiber.sibling;
         if (sibling !== null) {
           sibling.return = fiber.return;
           fiber = sibling;
@@ -237,21 +239,18 @@ function propagateContextChange<T>(
 graph TD
     A[useContext Context] --> B[readContext]
     B --> C[获取 context._currentValue]
-    C --> D{渲染阶段？}
-    D -->|是 | E[创建 ContextDependency]
-    D -->|否 | F[直接返回值]
-    E --> G[添加到 dependencies 链表]
-    G --> H[返回 value]
+    C --> D[创建 ContextDependency]
+    D --> E[添加到 fiber.dependencies]
+    E --> F[返回 value]
     
-    I[Provider value 变化] --> J[更新 _currentValue]
-    J --> K[propagateContextChange]
-    K --> L[遍历子树找消费者]
-    L --> M{有依赖？}
-    M -->|是 | N[匹配 context]
-    M -->|否 | O[继续遍历]
-    N --> P[标记更新]
-    P --> Q[scheduleUpdateOnFiber]
-    O --> L
+    G[Provider value 变化] --> H[更新 _currentValue]
+    H --> I[propagateContextChange]
+    I --> J[遍历子树]
+    J --> K{有 Context 依赖？}
+    K -->|是 | L[匹配 context]
+    L --> M[标记更新]
+    M --> N[scheduleUpdateOnFiber]
+    K -->|否 | O[继续遍历]
 ```
 
 ## 💡 实战技巧
@@ -326,7 +325,7 @@ function UserPart() {
 }
 ```
 
-### 4. Context + useReducer
+### 4. Context + useReducer 模式
 
 ```jsx
 const StateContext = React.createContext(null);
@@ -336,6 +335,8 @@ function reducer(state, action) {
   switch (action.type) {
     case 'increment':
       return { count: state.count + 1 };
+    case 'decrement':
+      return { count: state.count - 1 };
     default:
       return state;
   }
@@ -358,9 +359,36 @@ function Counter() {
   const dispatch = useContext(DispatchContext);
   
   return (
-    <button onClick={() => dispatch({ type: 'increment' })}>
-      Count: {state.count}
-    </button>
+    <div>
+      <button onClick={() => dispatch({ type: 'decrement' })}>-</button>
+      <span>{state.count}</span>
+      <button onClick={() => dispatch({ type: 'increment' })}>+</button>
+    </div>
+  );
+}
+```
+
+### 5. 性能优化模式
+
+```jsx
+// ✅ 拆分 Context 避免过度渲染
+const ThemeContext = React.createContext();
+const UserContext = React.createContext();
+
+// ✅ 使用 useMemo 缓存 Provider 值
+function App() {
+  const [theme, setTheme] = useState('light');
+  const [user, setUser] = useState({ name: 'John' });
+  
+  const themeValue = useMemo(() => ({ theme, setTheme }), [theme]);
+  const userValue = useMemo(() => ({ user, setUser }), [user]);
+  
+  return (
+    <ThemeContext.Provider value={themeValue}>
+      <UserContext.Provider value={userValue}>
+        <Content />
+      </UserContext.Provider>
+    </ThemeContext.Provider>
   );
 }
 ```
@@ -380,9 +408,10 @@ function App() {
 }
 // Child 每次都重新渲染
 
-// ✅ 正确：使用 useMemo
+// ✅ 正确：使用 useMemo 或 useState
 function App() {
-  const value = useMemo(() => ({ count: 0 }), []);
+  const [count, setCount] = useState(0);
+  const value = useMemo(() => ({ count, setCount }), [count]);
   
   return (
     <Context.Provider value={value}>
@@ -399,61 +428,84 @@ function App() {
 const MyContext = createContext('default');
 
 function App() {
-  // value 为 null 时，useContext 返回 'default'
+  // value 为 undefined 时，useContext 返回 'default'
   return (
-    <MyContext.Provider value={null}>
+    <MyContext.Provider value={undefined}>
       <Child />
     </MyContext.Provider>
   );
 }
 ```
 
-### 3. Context 性能
+### 3. Context 性能陷阱
 
-```
-Context 更新传播：
+```jsx
+// ❌ 错误：在 Provider 中直接创建函数
+function App() {
+  return (
+    <Context.Provider value={{ onClick: () => {} }}>
+      <Child />
+    </Context.Provider>
+  );
+}
 
-Provider
-│
-├─ Child1 (有依赖) ⚡ 更新
-├─ Child2 (无依赖) ⏭️ 跳过
-│  ├─ GrandChild (有依赖) ⚡ 更新
-│  └─ GrandChild2 (无依赖) ⏭️ 跳过
-└─ Child3 (有依赖) ⚡ 更新
-
-只有依赖该 Context 的组件会更新
+// ✅ 正确：使用 useCallback 或 useMemo
+function App() {
+  const onClick = useCallback(() => {}, []);
+  const value = useMemo(() => ({ onClick }), [onClick]);
+  
+  return (
+    <Context.Provider value={value}>
+      <Child />
+    </Context.Provider>
+  );
+}
 ```
 
 ## 🔬 深度解析
 
-### Context 依赖收集
+### Context 依赖收集机制
 
 ```javascript
-// Fiber 的 dependencies 结构
-
-fiber.dependencies = {
-  lanes: NoLanes,           // 待处理的更新
-  firstContext: {           // 第一个依赖
-    context: ThemeContext,
-    observedBits: 0b11,
-    next: {
-      context: UserContext,
-      observedBits: 0b11,
-      next: null
-    }
-  },
-  lastContext: ...          // 最后一个依赖
-};
+// 每个使用 useContext 的组件都会记录依赖
+function Component() {
+  const theme = useContext(ThemeContext);
+  const user = useContext(UserContext);
+  
+  // 组件的 fiber.dependencies 会包含：
+  // {
+  //   lanes: NoLanes,
+  //   firstContext: {
+  //     context: ThemeContext,
+  //     observedBits: 0b111...,
+  //     next: {
+  //       context: UserContext,
+  //       observedBits: 0b111...,
+  //       next: null
+  //     }
+  //   }
+  // }
+}
 ```
 
-### observedBits（已废弃）
+### Context 更新传播
 
-```javascript
-// React 16.x 的位掩码优化（已废弃）
-const theme = useContext(ThemeContext, 0b01);  // 只监听特定位
+```
+Context 更新传播流程：
 
-// React 17+ 不再支持
-const theme = useContext(ThemeContext);  // 总是监听全部
+1. Provider 渲染
+   ├── 更新 context._currentValue
+   └── 调用 propagateContextChange
+
+2. propagateContextChange
+   ├── 从 Provider 开始遍历
+   ├── 检查每个组件的 dependencies
+   ├── 匹配到相关 Context
+   └── 标记需要更新
+
+3. 调度更新
+   ├── 标记更新车道
+   └── scheduleUpdateOnFiber
 ```
 
 ## 🔬 调试技巧
@@ -461,38 +513,30 @@ const theme = useContext(ThemeContext);  // 总是监听全部
 ### 追踪 Context 依赖
 
 ```javascript
-// 开发模式下添加日志
-const originalReadContext = readContext;
-readContext = function(context, observedBits) {
-  console.group('readContext');
-  console.log('Context:', context.displayName || 'Anonymous');
-  console.log('Component:', currentlyRenderingFiber.type?.name);
+// 开发模式下查看 Context 依赖
+function DebugContext({ children }) {
+  const theme = useContext(ThemeContext);
   
-  const value = originalReadContext(context, observedBits);
+  useEffect(() => {
+    console.log('Theme context value:', theme);
+  }, [theme]);
   
-  console.log('Value:', value);
-  console.groupEnd();
-  
-  return value;
-};
+  return children;
+}
+
+// 在 React DevTools 中查看：
+// 1. 选择组件
+// 2. 查看 Hooks 面板
+// 3. 可以看到 useContext 的值
 ```
 
 ### 观察 Context 传播
 
 ```javascript
-// 追踪 propagateContextChange
-const originalPropagate = propagateContextChange;
-propagateContextChange = function(workInProgress, context, renderLanes) {
-  console.group('propagateContextChange');
-  console.log('Context:', context.displayName);
-  console.log('Provider:', workInProgress.type?.name);
-  console.log('Lanes:', renderLanes);
-  
-  const result = originalPropagate(workInProgress, context, renderLanes);
-  
-  console.groupEnd();
-  return result;
-};
+// 使用 React DevTools Profiler
+// 1. 打开 Profiler
+// 2. 记录 Context 变化
+// 3. 查看哪些组件重新渲染
 ```
 
 ## 🐛 常见问题
@@ -500,8 +544,8 @@ propagateContextChange = function(workInProgress, context, renderLanes) {
 ### Q: Context 和 Props 有什么区别？
 
 **A**:
-- Props：显式传递，层级清晰
-- Context：隐式传递，适合全局状态
+- Props：显式传递，层级清晰，适合父子通信
+- Context：隐式传递，适合全局状态或跨层级通信
 
 ```jsx
 // Props（显式）
@@ -526,30 +570,39 @@ propagateContextChange = function(workInProgress, context, renderLanes) {
 **A**:
 1. 拆分 Context（不要把所有状态放一个 Context）
 2. 拆分组件（只让需要的部分消费 Context）
-3. 使用 useMemo 缓存值
+3. 使用 useMemo 缓存 Provider 值
+4. 考虑使用状态管理库
 
 ```jsx
 // ✅ 拆分 Context
 const ThemeContext = createContext();
 const UserContext = createContext();
 
+// 组件只订阅需要的 Context
 const theme = useContext(ThemeContext);  // 只响应 theme 变化
-const user = useContext(UserContext);     // 只响应 user 变化
+const user = useContext(UserContext);    // 只响应 user 变化
 ```
 
 ### Q: useContext 和 Context.Consumer 有什么区别？
 
-**A**: 功能相同，useContext 更简洁。
+**A**: 功能相同，useContext 更简洁，性能更好。
 
 ```jsx
-// useContext
+// useContext（推荐）
 const value = useContext(Context);
 
-// Context.Consumer
+// Context.Consumer（类组件或需要渲染 props）
 <Context.Consumer>
   {value => <Child value={value} />}
 </Context.Consumer>
 ```
+
+### Q: 为什么 Context 更新后某些组件没有重新渲染？
+
+**A**: 可能原因：
+1. 组件没有使用 useContext
+2. Provider 值引用相同（对象/数组）
+3. 使用了 React.memo 且 props 未变化
 
 ---
 

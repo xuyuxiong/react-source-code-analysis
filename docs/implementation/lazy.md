@@ -18,15 +18,14 @@ packages/react/src/
 // packages/react/src/ReactLazy.js
 
 type LazyComponent<T, P> = {
-  $$typeof: Element,
+  $$typeof: symbol,
   _payload: P,           // 加载器
   _init: (payload: P) => T,  // 初始化函数
 };
 
 type Payload = {
-  _status: -1 | 0 | 1,   // -1: unloaded, 0: pending, 1: resolved
-  _result: any,          // 结果（模块或 Promise）
-  _response: Promise,    // 原始 Promise
+  _status: -1 | 0 | 1 | 2,   // -1: unloaded, 0: pending, 1: resolved, 2: rejected
+  _result: any,          // 结果（模块或 Promise/错误）
 };
 ```
 
@@ -177,7 +176,6 @@ import { BrowserRouter, Routes, Route } from 'react-router-dom';
 
 const Home = lazy(() => import('./pages/Home'));
 const About = lazy(() => import('./pages/About'));
-const Contact = lazy(() => import('./pages/Contact'));
 
 function App() {
   return (
@@ -186,7 +184,6 @@ function App() {
         <Routes>
           <Route path="/" element={<Home />} />
           <Route path="/about" element={<About />} />
-          <Route path="/contact" element={<Contact />} />
         </Routes>
       </Suspense>
     </BrowserRouter>
@@ -194,34 +191,27 @@ function App() {
 }
 ```
 
-### 3. 组合使用
+### 3. 错误处理
 
 ```jsx
-// 多个 lazy 组件
-const Header = lazy(() => import('./Header'));
-const Sidebar = lazy(() => import('./Sidebar'));
-const Content = lazy(() => import('./Content'));
+import { lazy, Suspense } from 'react';
+
+const LazyComponent = lazy(() => import('./Component'));
 
 function App() {
   return (
-    <Suspense fallback={<FullPageLoading />}>
-      <Header />
-      
-      <div className="layout">
-        <Suspense fallback={<SidebarLoading />}>
-          <Sidebar />
-        </Suspense>
-        
-        <Suspense fallback={<ContentLoading />}>
-          <Content />
-        </Suspense>
-      </div>
-    </Suspense>
+    <ErrorBoundary fallback={<ErrorFallback />}>
+      <Suspense fallback={<Loading />}>
+        <LazyComponent />
+      </Suspense>
+    </ErrorBoundary>
   );
 }
 ```
 
-### 4. Named Exports
+## ⚠️ 注意事项
+
+### 1. 使用限制
 
 ```jsx
 // ❌ 错误：lazy 只支持 default export
@@ -233,80 +223,6 @@ const NamedComponent = React.lazy(() =>
     default: module.NamedComponent 
   }))
 );
-```
-
-### 5. 预加载
-
-```jsx
-// 手动触发预加载
-const LazyComponent = React.lazy(() => import('./Component'));
-
-// 预加载函数
-function preload() {
-  // 调用 import 触发加载
-  import('./Component');
-}
-
-// 在合适时机预加载
-function preloadOnHover() {
-  const button = document.getElementById('load-button');
-  button.addEventListener('mouseenter', () => {
-    preload();
-  }, { once: true });
-}
-```
-
-### 6. 错误处理
-
-```jsx
-import { lazy, Suspense, Component } from 'react';
-
-const LazyComponent = React.lazy(() => import('./Component'));
-
-class ErrorBoundary extends Component {
-  state = { hasError: false };
-  
-  static getDerivedStateFromError(error) {
-    return { hasError: true };
-  }
-  
-  render() {
-    if (this.state.hasError) {
-      return <ErrorFallback />;
-    }
-    return this.props.children;
-  }
-}
-
-function App() {
-  return (
-    <ErrorBoundary>
-      <Suspense fallback={<Loading />}>
-        <LazyComponent />
-      </Suspense>
-    </ErrorBoundary>
-  );
-}
-```
-
-## ⚠️ 注意事项
-
-### 1. 不支持服务端渲染
-
-```jsx
-// ❌ SSR 中不支持 React.lazy
-// 需要使用其他方法如 @loadable/components
-
-// ✅ 客户端渲染
-import { lazy, Suspense } from 'react';
-
-function App() {
-  return (
-    <Suspense fallback={<Loading />}>
-      <LazyComponent />
-    </Suspense>
-  );
-}
 ```
 
 ### 2. 必须在 Suspense 内部
@@ -322,139 +238,20 @@ const LazyComponent = React.lazy(() => import('./Component'));
 </Suspense>
 ```
 
-### 3. 不能用于条件加载
-
-```jsx
-// ❌ 错误：lazy 调用必须在顶层
-function Component({ show }) {
-  if (show) {
-    const LazyComponent = React.lazy(() => import('./Component'));
-    return <LazyComponent />;
-  }
-  return null;
-}
-
-// ✅ 正确
-const LazyComponent = React.lazy(() => import('./Component'));
-
-function Component({ show }) {
-  if (show) {
-    return (
-      <Suspense fallback={<Loading />}>
-        <LazyComponent />
-      </Suspense>
-    );
-  }
-  return null;
-}
-```
-
-### 4. 代码分割粒度
-
-```jsx
-// ❌ 过度分割（太多小 chunk）
-const Button = lazy(() => import('./Button'));
-const Input = lazy(() => import('./Input'));
-const Form = lazy(() => import('./Form'));
-
-// ✅ 合理分割（按路由/功能模块）
-const HomePage = lazy(() => import('./pages/Home'));
-const SettingsPage = lazy(() => import('./pages/Settings'));
-```
-
 ## 🔬 调试技巧
 
-### 追踪 Lazy 加载
+### 追踪加载状态
 
 ```javascript
-// 开发模式下添加日志
-const originalResolveLazy = resolveLazy;
-resolveLazy = function(payload) {
-  console.log('resolveLazy called', {
-    status: payload._status,
-    statusText: ['Uninitialized', 'Pending', 'Resolved', 'Rejected'][payload._status + 1],
-  });
-  
-  try {
-    return originalResolveLazy(payload);
-  } catch (error) {
-    console.log('Lazy threw:', error);
-    throw error;
-  }
-};
-```
-
-### 观察 chunk 加载
-
-```javascript
-// 在浏览器 Network 面板观察
-// 或使用 Performance API
-const startTime = performance.now();
-
+// 观察加载状态
 const LazyComponent = React.lazy(() => 
   import('./Component').then(module => {
-    const endTime = performance.now();
-    console.log('Component loaded in', endTime - startTime, 'ms');
+    console.log('Component loaded');
     return module;
   })
 );
 ```
 
-## 🐛 常见问题
-
-### Q: React.lazy 和动态 import 有什么区别？
-
-**A**: 
-- `import()`：返回 Promise，需要手动处理
-- `React.lazy()`：返回组件，配合 Suspense 自动处理加载状态
-
-```jsx
-// 动态 import（手动）
-useEffect(() => {
-  import('./Component').then(module => {
-    setComponent(() => module.default);
-  });
-}, []);
-
-// React.lazy（自动）
-const Component = React.lazy(() => import('./Component'));
-<Suspense fallback={<Loading />}>
-  <Component />
-</Suspense>
-```
-
-### Q: 如何加速 lazy 组件加载？
-
-**A**:
-1. 使用 webpackChunkName 命名 chunk
-2. 预加载（preload/prefetch）
-3. 合理分割代码
-
-```jsx
-// webpackChunkName
-const Component = React.lazy(() => 
-  import(/* webpackChunkName: "component" */ './Component')
-);
-
-// 预加载
-<link rel="preload" href="/static/js/component.js" as="script" />
-```
-
-### Q: lazy 组件加载失败怎么办？
-
-**A**: 配合 Error Boundary 捕获错误。
-
-```jsx
-<ErrorBoundary fallback={<ErrorFallback />}>
-  <Suspense fallback={<Loading />}>
-    <LazyComponent />
-  </Suspense>
-</ErrorBoundary>
-```
-
----
-
 ## 📖 下一步
-
 - [Error Boundaries 实现](./error-boundaries)
 - [useDeferredValue 实现](./deferred)

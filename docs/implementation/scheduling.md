@@ -31,12 +31,11 @@ packages/react-reconciler/src/
 ### 工作时间限制
 
 ```javascript
-// 默认时间切片限制
-const DEFAULT_TIMEOUT_INTERVAL = 5;  // 5ms
-const MAX_PAYLOAD_SIZE = 1024 * 1024;
-
-// 每一帧的工作时间
-const frameInterval = 5;  // 约 120fps
+// packages/scheduler/src/SchedulerFeatureFlags.js
+const frameYieldMs = 5;  // 默认5ms时间片
+const userBlockingPriorityTimeout = 250;  // 用户阻塞优先级超时
+const normalPriorityTimeout = 5000;  // 普通优先级超时
+const lowPriorityTimeout = 10000;  // 低优先级超时
 ```
 
 ## 🔬 Scheduler 实现

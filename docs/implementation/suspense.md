@@ -13,21 +13,29 @@ packages/react-reconciler/src/
 
 ## 🔍 数据结构
 
-### SuspenseComponent
+### SuspenseState 数据结构
 
 ```javascript
 // packages/react-reconciler/src/ReactFiberSuspenseComponent.js
 
 type SuspenseState = {
-  // 当前的 fallback 状态
+  // 如果边界仍然脱水，我们存储SuspenseInstance
+  // 这里表示它是脱水的（标志）并快速访问
+  // 检查isSuspenseInstancePending等内容
   dehydrated: null | SuspenseInstance,
-  retryLane: Lane,  // 重试时的优先级
-  pollingMs: number, // 轮询间隔（用于过期回退）
+  // 表示我们应该尝试在脱水边界进行水合的车道
+  // OffscreenLane是脱水边界的默认值
+  // NoLane是正常边界的默认值，变成"正常"优先级
+  retryLane: Lane,
+  // 尝试水合此边界时发生的错误
+  hydrationErrors: Array<CapturedValue<mixed>> | null,
+  // 用于SSR水合的树上下文
+  treeContext: null | TreeContext,
 };
 
 type SuspenseInstance = {
-  // SSR hydration 相关
-  data: any,
+  // SSR hydration相关的实例数据
+  // 实际结构由宿主环境定义
 };
 ```
 

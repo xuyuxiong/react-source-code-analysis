@@ -12,233 +12,281 @@ packages/react-reconciler/src/
 
 ## 🔍 数据结构
 
-### TransitionLane
+### useTransition Hook 状态
 
 ```javascript
-// packages/react-reconciler/src/ReactFiberLane.js
-
-// Transition Lanes
-const TransitionLanes = 0b00000000000000000000000000111100;
-const TransitionLane1 = 0b00000000000000000000000000000100;
-const TransitionLane2 = 0b00000000000000000000000000001000;
-// ...
-
-// 获取下一个可用的 Transition Lane
-function getNextTransitionLane(): Lane {
-  transitionLane = (transitionLane << 1) | (TransitionLanes & ~transitionLane);
-  
-  // 如果超出范围，重置
-  if ((transitionLane & TransitionLanes) === 0) {
-    transitionLane = TransitionLane1;
-  }
-  
-  return transitionLane;
-}
+// useTransition 返回 [isPending, startTransition]
+// Hook.memoizedState 存储 [boolean, () => void]
 ```
 
-### useTransition Hook 结构
+### Transition 状态
 
 ```javascript
-type TransitionHookState = {
-  pending: boolean,  // 是否有挂起的 transition
-  setPending: Dispatch<boolean>,  // 更新 pending 状态的 dispatch
-};
+// ReactCurrentBatchConfig.transition 用于标记当前是否在 transition 中
+type TransitionStatus = 0 | 1;  // 0: 无 transition, 1: 有 transition
 ```
 
 ## 🔬 useTransition 实现
 
-### hook 入口
+### mountTransition（首次渲染）
 
 ```javascript
 // packages/react-reconciler/src/ReactFiberHooks.js
 
-function useTransition(): [
-  (callback: () => void) => void,  // startTransition
-  boolean,                          // isPending
+function mountTransition(): [
+  boolean,
+  (callback: () => void, options?: StartTransitionOptions) => void,
 ] {
-  return requestUpdateHooks(TransitionHookState);
+  const hook = mountWorkInProgressHook();
+  
+  // 创建初始状态
+  const [isPending, setPending] = mountStateImpl((false: Thenable<boolean> | boolean));
+  
+  // 创建 dispatch 函数
+  const setPending: boolean => void = (dispatchOptimisticSetState.bind(
+    null,
+    currentlyRenderingFiber,
+    false,
+    ((isPending.queue: any): UpdateQueue<boolean, boolean>),
+  ): any);
+  
+  // 创建 startTransition 函数
+  const start = (startTransition: any).bind(
+    null,
+    currentlyRenderingFiber,
+    ((isPending.queue: any): UpdateQueue<boolean, boolean>),
+    true,
+    false,
+  );
+  
+  // 存储 [isPending, start]
+  hook.memoizedState = [false, start];
+  
+  return [false, start];
 }
 ```
 
-### requestUpdateHooks
+### updateTransition（更新渲染）
 
 ```javascript
-function requestUpdateHooks(hookState: TransitionHookState) {
-  // 1. 获取或创建 Hook
+function updateTransition(): [
+  boolean,
+  (callback: () => void, options?: StartTransitionOptions) => void,
+] {
   const hook = updateWorkInProgressHook();
+  const currentStateHook = ((currentHook: any): Hook);
   
-  // 2. 获取当前状态
-  const state = hook.memoizedState;
+  // 获取 pending 状态
+  const [isPending] = updateState(false);
   
-  if (state !== null) {
-    // 已有状态，直接返回
-    return [state.start, state.pending];
-  }
+  // 获取 start 函数
+  const start = hook.memoizedState[1];
   
-  // 3. 创建新的 transition state
-  const [isPending, setPending] = useState(false);
-  
-  const start = (callback: () => void) => {
-    // 4. 标记为 transition 更新
-    startTransition(asyncCallback, callback);
-  };
-  
-  // 5. 缓存 hook state
-  hook.memoizedState = {
-    start,
-    pending: isPending,
-  };
-  
-  return [start, isPending];
+  return [isPending, start];
 }
 ```
 
-### startTransition
+### startTransition（核心实现）
 
 ```javascript
-// packages/react-reconciler/src/ReactFiberWorkLoop.js
+// packages/react-reconciler/src/ReactFiberHooks.js
 
 function startTransition(
-  scope: () => void,
+  fiber: Fiber,
+  queue: UpdateQueue<boolean | Thenable<boolean>, BasicStateAction<boolean | Thenable<boolean>>>,
+  pendingState: boolean,
+  finishedState: boolean,
+  callback: () => mixed,
   options?: StartTransitionOptions,
 ): void {
-  // 1. 获取之前的 transition
-  const prevTransition = ReactCurrentBatchConfig.transition;
+  const previousPriority = getCurrentUpdatePriority();
+  setCurrentUpdatePriority(
+    higherEventPriority(previousPriority, ContinuousEventPriority),
+  );
+
+  const prevTransition = ReactSharedInternals.T;
+  const currentTransition: Transition = ({}: any);
   
-  // 2. 设置当前 transition（标记为并发更新）
-  ReactCurrentBatchConfig.transition = 1;
+  // React 18 新特性支持
+  if (enableViewTransition) {
+    currentTransition.types =
+      prevTransition !== null
+        ? prevTransition.types
+        : null;
+  }
   
-  // 3. 进入并发模式
-  const currentTransition = ReactCurrentBatchConfig.transition;
+  if (enableGestureTransition) {
+    currentTransition.gesture = null;
+  }
   
+  if (enableTransitionTracing) {
+    currentTransition.name =
+      options !== undefined && options.name !== undefined ? options.name : null;
+    currentTransition.startTime = now();
+  }
+  
+  if (__DEV__) {
+    currentTransition._updatedFibers = new Set();
+  }
+
+  // 标记为 transition 更新
+  ReactSharedInternals.T = currentTransition;
+  
+  // 设置 pending 状态
+  dispatchOptimisticSetState(fiber, false, queue, pendingState);
+
   try {
-    // 4. 执行回调（其中的 setState 会被标记为 transition）
-    scope();
+    const returnValue = callback();
+    const onStartTransitionFinish = ReactSharedInternals.S;
+    if (onStartTransitionFinish !== null) {
+      onStartTransitionFinish(currentTransition, returnValue);
+    }
+
+    // 处理异步 transition
+    if (
+      returnValue !== null &&
+      typeof returnValue === 'object' &&
+      typeof returnValue.then === 'function'
+    ) {
+      const thenable = ((returnValue: any): Thenable<mixed>);
+      if (__DEV__) {
+        ReactSharedInternals.asyncTransitions++;
+        thenable.then(releaseAsyncTransition, releaseAsyncTransition);
+      }
+      
+      // 创建 thenable 用于 Suspense
+      const thenableForFinishedState = chainThenableValue(
+        thenable,
+        finishedState,
+      );
+      
+      dispatchSetStateInternal(
+        fiber,
+        queue,
+        (thenableForFinishedState: any),
+        requestUpdateLane(fiber),
+      );
+    } else {
+      dispatchSetStateInternal(
+        fiber,
+        queue,
+        finishedState,
+        requestUpdateLane(fiber),
+      );
+    }
+  } catch (error) {
+    // 处理错误
+    const rejectedThenable: RejectedThenable<boolean> = {
+      then() {},
+      status: 'rejected',
+      reason: error,
+    };
+    
+    dispatchSetStateInternal(
+      fiber,
+      queue,
+      rejectedThenable,
+      requestUpdateLane(fiber),
+    );
   } finally {
-    // 5. 恢复之前的 transition
-    ReactCurrentBatchConfig.transition = prevTransition;
+    setCurrentUpdatePriority(previousPriority);
+
+    if (prevTransition !== null && currentTransition.types !== null) {
+      prevTransition.types = currentTransition.types;
+    }
+    ReactSharedInternals.T = prevTransition;
+
+    if (__DEV__) {
+      if (prevTransition === null && currentTransition._updatedFibers) {
+        const updatedFibersCount = currentTransition._updatedFibers.size;
+        currentTransition._updatedFibers.clear();
+        if (updatedFibersCount > 10) {
+          console.warn(
+            'Detected a large number of updates inside startTransition. ' +
+              'If this is due to a subscription please re-write it to use React provided hooks. ' +
+              'Otherwise concurrent mode guarantees are off the table.',
+          );
+        }
+      }
+    }
   }
 }
 ```
 
-### dispatchAction 中的 transition 处理
+## 📊 Lane 优先级系统
 
-```javascript
-function dispatchAction(
-  fiber: Fiber,
-  queue: UpdateQueue,
-  action: any,
-): void {
-  // 1. 获取当前 transition
-  const currentTransition = ReactCurrentBatchConfig.transition;
-  
-  // 2. 创建 Update
-  const update = {
-    eventTime: requestEventTime(),
-    lane: requestUpdateLane(fiber),  // 根据 transition 设置 lane
-    action,
-    hasEagerState: false,
-    eagerState: null,
-    next: null,
-  };
-  
-  // 3. 如果是 transition，使用 Transition Lane
-  if (currentTransition !== null) {
-    // Transition 更新使用较低的优先级
-    update.lane = getNextTransitionLane();
-  }
-  
-  // ... 添加到队列并调度
-}
-```
-
-## 📊 优先级模型
-
-```mermaid
-graph TD
-    A[setState 调用] --> B{有 transition?}
-    B -->|是 | C[Transition Lane]
-    B -->|否 | D[普通 Lane]
-    
-    C --> E[低优先级]
-    D --> F[高优先级]
-    
-    E --> G{有高优先级任务？}
-    G -->|是 | H[中断 transition]
-    G -->|否 | I[继续执行]
-    
-    F --> J[立即执行]
-    
-    H --> K[先处理高优先级]
-    K --> L[恢复 transition]
-    L --> I
-    
-    I --> M[渲染完成]
-    J --> M
-```
-
-### Lane 优先级（从高到低）
+### Transition Lane 分配
 
 ```javascript
 // packages/react-reconciler/src/ReactFiberLane.js
 
-const SyncLane = 0b00000000000000000000000000000001;     // 同步（最高）
+// Transition Lanes（低优先级）
+const TransitionLane1 = 0b00000000000000000000000000000100;
+const TransitionLane2 = 0b00000000000000000000000000001000;
+const TransitionLane3 = 0b00000000000000000000000000010000;
+const TransitionLane4 = 0b00000000000000000000000000100000;
+
+// 获取下一个可用的 Transition Lane
+let transitionLane = TransitionLane1;
+
+function requestTransitionLane(): Lane {
+  // 循环使用 Transition Lanes
+  const lane = transitionLane;
+  transitionLane = (transitionLane << 1) | (TransitionLanes & ~transitionLane);
+  
+  if ((transitionLane & TransitionLanes) === 0) {
+    transitionLane = TransitionLane1;
+  }
+  
+  return lane;
+}
+```
+
+### 优先级层次
+
+```javascript
+// 优先级从高到低
+const SyncLane = 0b00000000000000000000000000000001;        // 同步
 const InputContinuousLane = 0b00000000000000000000000000000110;  // 输入
-const DefaultLane = 0b00000000000000000000000000010000;   // 默认
+const DefaultLane = 0b00000000000000000000000000010000;     // 默认
 const TransitionLanes = 0b00000000000000000000000000111100;  // Transition
-const IdleLane = 0b00000000000000000000000001000000;      // 空闲（最低）
+const IdleLane = 0b00000000000000000000000001000000;        // 空闲
 ```
 
-## 🔬 isPending 实现
+## 📊 完整流程图
 
-### pending 状态管理
-
-```javascript
-// packages/react-reconciler/src/ReactFiberHooks.js
-
-function updateTransition(): [
-  boolean,  // isPending
-  () => void, // start
-] {
-  // 1. 获取当前的 pending 状态
-  const [isPending] = useState(false);
-  
-  // 2. 检查是否有待处理的 transition
-  const hasPending = checkForUpdates();
-  
-  // 3. 更新 pending 状态
-  if (hasPending !== isPending) {
-    setPending(hasPending);
-  }
-  
-  return [isPending, startTransition];
-}
-
-function checkForUpdates(): boolean {
-  // 检查 pending lanes 中是否有 transition
-  return (pendingLanes & TransitionLanes) !== NoLanes;
-}
-```
-
-### 清理 pending
-
-```javascript
-// 当 transition 完成后清除 pending
-
-function finishTransition() {
-  // 检查是否还有待处理的 transition
-  const stillPending = (pendingLanes & TransitionLanes) !== NoLanes;
-  
-  if (!stillPending) {
-    // 没有 pending 了，更新 isPending
-    setPending(false);
-  }
-}
+```mermaid
+graph TD
+    A[useTransition] --> B[mountTransition/updateTransition]
+    B --> C[返回 [isPending, startTransition]]
+    
+    D[startTransition(callback)] --> E[设置 ReactCurrentBatchConfig.T = 1]
+    E --> F[设置 pending = true]
+    F --> G[执行 callback]
+    G --> H{有异步操作？}
+    H -->|是 | I[创建 thenable]
+    H -->|否 | J[直接 dispatch]
+    
+    I --> K[等待 thenable 完成]
+    K --> L[pending = false]
+    J --> L
+    
+    M[Provider value 变化] --> N[触发重新渲染]
+    N --> O{有 transition lane？}
+    O -->|是 | P[低优先级渲染]
+    O -->|否 | Q[正常渲染]
+    
+    P --> R{有高优先级中断？}
+    R -->|是 | S[暂停 transition]
+    R -->|否 | T[完成 transition]
+    
+    S --> U[处理高优先级]
+    U --> T
 ```
 
 ## 💡 实战技巧
 
-### 1. 基本使用
+### 1. 基本使用模式
 
 ```jsx
 function TabContainer() {
@@ -276,7 +324,7 @@ function TabContainer() {
 }
 ```
 
-### 2. 搜索结果
+### 2. 搜索功能优化
 
 ```jsx
 function SearchResults() {
@@ -306,19 +354,13 @@ function SearchResults() {
 }
 ```
 
-### 3. 列表过滤
+### 3. 列表过滤优化
 
 ```jsx
 function FilterableList({ items }) {
   const [filterText, setFilterText] = useState('');
   const [isPending, startTransition] = useTransition();
-  
-  // 过滤可能在大量数据上操作
-  const filteredItems = useMemo(() => {
-    return items.filter(item =>
-      item.name.toLowerCase().includes(filterText.toLowerCase())
-    );
-  }, [items, filterText]);
+  const [displayItems, setDisplayItems] = useState(items);
   
   function handleChange(e) {
     const nextFilterText = e.target.value;
@@ -326,10 +368,12 @@ function FilterableList({ items }) {
     // 输入框立即响应
     setFilterText(nextFilterText);
     
-    // 列表过滤可以延迟
+    // 过滤操作可以延迟
     startTransition(() => {
-      // 这里不需要额外操作，因为 filteredItems 是计算属性
-      // useTransition 确保了过滤在并发模式下进行
+      const filtered = items.filter(item =>
+        item.name.toLowerCase().includes(nextFilterText.toLowerCase())
+      );
+      setDisplayItems(filtered);
     });
   }
   
@@ -337,7 +381,7 @@ function FilterableList({ items }) {
     <>
       <input value={filterText} onChange={handleChange} />
       {isPending && <LoadingSpinner />}
-      <List items={filteredItems} />
+      <List items={displayItems} />
     </>
   );
 }
@@ -364,70 +408,17 @@ function MultiStepForm() {
   return (
     <>
       {isPending && <LoadingSpinner />}
-      <FormStep step={step} onNext={nextStep} onSubmit={submitForm} />
+      <FormStep 
+        step={step} 
+        onNext={nextStep} 
+        onSubmit={submitForm} 
+      />
     </>
   );
 }
 ```
 
-## ⚠️ 注意事项
-
-### 1. 不要在事件处理中直接调用
-
-```jsx
-// ❌ 错误
-function handleClick() {
-  startTransition(() => {
-    setCount(c => c + 1);
-  });
-}
-
-// ✅ 正确
-function handleClick() {
-  setCount(c => c + 1);  // 直接调用
-}
-
-function ExpensiveComponent() {
-  const [isPending, startTransition] = useTransition();
-  
-  // 在需要的时候调用
-  const handleClick = () => {
-    startTransition(() => {
-      setExpensiveState(newState);
-    });
-  };
-}
-```
-
-### 2. useTransition vs useDeferredValue
-
-```jsx
-// useTransition - 控制 setState
-function ComponentA() {
-  const [isPending, startTransition] = useTransition();
-  
-  function handleClick() {
-    startTransition(() => {
-      setState(newValue);
-    });
-  }
-}
-
-// useDeferredValue - 延迟派生值
-function ComponentB() {
-  const [text, setText] = useState('');
-  const deferredText = useDeferredValue(text);
-  
-  return (
-    <>
-      <input value={text} onChange={e => setText(e.target.value)} />
-      <ExpensiveList text={deferredText} />
-    </>
-  );
-}
-```
-
-### 3. 配合 Suspense
+### 5. 配合 Suspense 使用
 
 ```jsx
 function SearchPage() {
@@ -441,17 +432,88 @@ function SearchPage() {
   }
   
   return (
-    <Suspense fallback={<LoadingSpinner />}>
-      <SearchResults query={query} />
-    </Suspense>
+    <>
+      <input 
+        value={query} 
+        onChange={e => handleSearch(e.target.value)} 
+      />
+      {isPending && <LoadingSpinner />}
+      <Suspense fallback={<LoadingSpinner />}>
+        <SearchResults query={query} />
+      </Suspense>
+    </>
   );
 }
 ```
 
-### 4. transition 的优先级
+## ⚠️ 注意事项
+
+### 1. 使用场景选择
+
+```jsx
+// ✅ 适合使用 useTransition
+- 列表过滤/排序
+- Tab 切换
+- 搜索建议
+- 大数据渲染
+- 可以延迟的 UI 更新
+
+// ❌ 不适合使用 useTransition
+- 用户输入反馈
+- 按钮点击响应
+- 关键状态更新
+- 错误处理
+```
+
+### 2. 与 useDeferredValue 的区别
+
+```jsx
+// useTransition - 控制 setState
+function ComponentA() {
+  const [isPending, startTransition] = useTransition();
+  
+  function handleChange(value) {
+    startTransition(() => {
+      setState(value);  // 控制状态更新
+    });
+  }
+}
+
+// useDeferredValue - 延迟派生值
+function ComponentB() {
+  const [text, setText] = useState('');
+  const deferredText = useDeferredValue(text);  // 延迟计算结果
+  
+  return (
+    <>
+      <input value={text} onChange={e => setText(e.target.value)} />
+      <ExpensiveList text={deferredText} />
+    </>
+  );
+}
+```
+
+### 3. 异步操作处理
+
+```jsx
+// ✅ 正确处理异步 transition
+function AsyncComponent() {
+  const [isPending, startTransition] = useTransition();
+  
+  async function handleAction() {
+    startTransition(async () => {
+      // 异步操作会被正确包装
+      await fetchData();
+      setState(newData);
+    });
+  }
+}
+```
+
+### 4. 优先级层次
 
 ```
-优先级顺序：
+优先级从高到低：
 
 1. Sync（同步）
    └── flushSync(() => setState())
@@ -462,7 +524,7 @@ function SearchPage() {
 3. Default（默认）
    └── 普通 setState
 
-4. Transition（过渡）⭐
+4. Transition（过渡）⭐ useTransition
    └── startTransition(() => setState())
 
 5. Idle（空闲）
@@ -471,60 +533,57 @@ function SearchPage() {
 
 ## 🔬 调试技巧
 
-### 追踪 transition
+### 追踪 transition 执行
 
 ```javascript
-// 开发模式下添加日志
-const originalStartTransition = startTransition;
-startTransition = function(scope) {
-  console.group('startTransition');
-  console.log('Previous transition:', ReactCurrentBatchConfig.transition);
+// 开发模式下查看 transition 状态
+function DebugTransition() {
+  const [isPending, startTransition] = useTransition();
   
-  // 设置 transition 标志
-  ReactCurrentBatchConfig.transition = 1;
+  useEffect(() => {
+    console.log('Transition pending:', isPending);
+  }, [isPending]);
   
-  const result = scope();
-  
-  console.log('Scheduled transition updates');
-  console.groupEnd();
-  
-  // 恢复
-  ReactCurrentBatchConfig.transition = 0;
-  
-  return result;
-};
+  return null;
+}
 ```
 
 ### 观察 Lane 分配
 
 ```javascript
-// 追踪 lane 分配
-const originalRequestUpdateLane = requestUpdateLane;
-requestUpdateLane = function(fiber) {
-  const lane = originalRequestUpdateLane(fiber);
+// 在 React DevTools 中查看：
+// 1. 打开 Profiler
+// 2. 记录组件更新
+// 3. 查看 Lane 分配
+```
+
+### 性能分析
+
+```javascript
+// 使用 React Profiler API
+function ProfiledComponent() {
+  const [isPending, startTransition] = useTransition();
   
-  console.log('requestUpdateLane', {
-    component: fiber.type?.name,
-    lane,
-    isTransition: (lane & TransitionLanes) !== 0,
-  });
-  
-  return lane;
-};
+  function handleChange(value) {
+    startTransition(() => {
+      // 性能关键代码
+      console.time('transition');
+      setState(value);
+      console.timeEnd('transition');
+    });
+  }
+}
 ```
 
 ## 🐛 常见问题
 
 ### Q: useTransition 有什么用？
 
-**A**: 将更新标记为非紧急，允许 React 中断渲染以响应更紧急的更新。
+**A**: 将更新标记为非紧急，允许 React 中断渲染以响应更紧急的更新，提升用户体验。
 
 ### Q: startTransition 包裹的 setState 会怎样？
 
-**A**:
-1. 使用较低的优先级（Transition Lane）
-2. 可以被高优先级更新中断
-3. 完成后触发 isPending 状态变化
+**A**: 使用较低的 Transition Lane 优先级，可以被高优先级更新中断，完成后自动清除 pending 状态。
 
 ### Q: 什么时候应该使用 useTransition？
 
@@ -535,31 +594,19 @@ requestUpdateLane = function(fiber) {
 - 大数据渲染
 - 任何可以延迟的 UI 更新
 
-### Q: useTransition 和 React.lazy 配合使用？
+### Q: useTransition 和 useDeferredValue 有什么区别？
 
-```jsx
-function Page() {
-  const [isPending, startTransition] = useTransition();
-  const [page, setPage] = useState('home');
-  
-  function navigate(newPage) {
-    startTransition(() => {
-      setPage(newPage);  // 触发 lazy 加载
-    });
-  }
-  
-  return (
-    <Suspense fallback={<LoadingSpinner />}>
-      {isPending && <LoadingSpinner />}
-      {pages[page]}
-    </Suspense>
-  );
-}
-```
+**A**:
+- useTransition：控制状态更新（主动）
+- useDeferredValue：延迟派生值（被动）
+
+### Q: 如何调试 transition？
+
+**A**: 使用 React DevTools Profiler 查看组件更新，观察 isPending 状态变化，或使用 console.log 追踪。
 
 ---
 
 ## 📖 下一步
 
-- [useDeferredValue 实现](./deferred)
-- [Automatic Batching](./batching)
+- [useDeferredValue 实现](./use-deferred-value)
+- [useId 实现](./use-id)

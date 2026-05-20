@@ -1,12 +1,13 @@
 # useSyncExternalStore 实现
 
-useSyncExternalStore 是 React 18 新增的 Hook，用于订阅外部数据源（如 Redux、Zustand 等状态管理库）。
+useSyncExternalStore 是 React 18 新增的 Hook，用于订阅外部数据源（如 Redux、Zustand 等状态管理库），确保在并发渲染中数据的一致性。
 
 ## 📦 模块位置
 
 ```
 packages/react-reconciler/src/
-└── ReactFiberHooks.js    # useSyncExternalStore 实现
+├── ReactFiberHooks.js       # useSyncExternalStore 实现
+└── ReactFiberNewContext.js  # 依赖收集
 ```
 
 ## 🔍 问题背景
@@ -55,161 +56,140 @@ function useSyncExternalStore<Snapshot>(
 
 ## 🔬 核心实现
 
-### Hook 入口
+### Store 实例结构
+
+```javascript
+// 每个 Hook 关联的 store 实例
+type StoreInstance<T> = {
+  value: T,                    // 当前值
+  getSnapshot: () => T,        // 获取快照
+  unsubscribe?: () => void,    // 取消订阅
+  subscribing: boolean,        // 是否已订阅
+};
+```
+
+### mountSyncExternalStore（首次渲染）
 
 ```javascript
 // packages/react-reconciler/src/ReactFiberHooks.js
 
-function useSyncExternalStore(
-  subscribe: () => () => void,
-  getSnapshot: () => any,
-  getServerSnapshot?: () => any,
-): any {
-  // 1. 检查是否在服务器端渲染
-  if (getServerSnapshot === undefined) {
-    throw new Error('Missing getServerSnapshot');
-  }
-  
-  // 2. 创建/更新 Hook
+function mountSyncExternalStore<T>(
+  subscribe: (onStoreChange: () => void) => () => void,
+  getSnapshot: () => T,
+  getServerSnapshot?: () => T,
+): T {
   const hook = mountWorkInProgressHook();
   
-  // 3. 获取快照
-  const snapshot = getSnapshot();
-  
-  // 4. 检查快照变化
-  // （使用 Object.is 比较）
-  
-  return snapshot;
-}
-```
-
-### Store 实例
-
-```javascript
-// 每个 Hook 关联的 store 实例
-type StoreInstance = {
-  value: any,           // 当前值
-  getSnapshot: () => any,  // 获取快照
-  handleChange: () => void, // 变化处理
-  subscribing: boolean,    // 是否已订阅
-};
-```
-
-### mountSyncExternalStore
-
-```javascript
-function mountSyncExternalStore(
-  subscribe: () => () => void,
-  getSnapshot: () => any,
-  getServerSnapshot?: () => any,
-): any {
-  // 1. 创建 Hook
-  const hook = mountWorkInProgressHook();
-  
-  // 2. 检查 SSR
-  const isHydrating = getServerSnapshot !== undefined;
+  // 1. 检查是否是服务端渲染
+  const isHydrating = getIsHydrating();
   
   if (isHydrating) {
-    // 3. SSR 时使用服务端快照
+    // 2. SSR 时使用服务端快照
+    if (getServerSnapshot === undefined) {
+      throw new Error(
+        'Missing getServerSnapshot, which is required for ' +
+          'server-rendered content. Will revert to client rendering.',
+      );
+    }
+    
     const serverSnapshot = getServerSnapshot();
-    hook.memoizedState = {
-      value: serverSnapshot,
-      store: null,
-    };
+    if (__DEV__) {
+      if (!didWarnUncachedGetSnapshot) {
+        if (serverSnapshot !== getServerSnapshot()) {
+          console.error(
+            'The result of getServerSnapshot should be cached to avoid an infinite loop',
+          );
+          didWarnUncachedGetSnapshot = true;
+        }
+      }
+    }
+    
+    hook.memoizedState = serverSnapshot;
     return serverSnapshot;
   }
   
-  // 4. 客户端：创建 store 实例
-  const store = {
+  // 3. 创建 store 实例
+  const store: StoreInstance<T> = {
     value: null,
     getSnapshot,
     subscribing: false,
-    handleChange: null,
   };
   
-  // 5. 获取初始快照
+  // 4. 获取初始快照
   const snapshot = getSnapshot();
   store.value = snapshot;
   
-  // 6. 创建变化处理函数
-  store.handleChange = () => {
+  // 5. 创建变化处理函数
+  const handleStoreChange = () => {
     const nextSnapshot = getSnapshot();
     
-    // 7. 检查快照是否变化
-    if (!Object.is(store.value, nextSnapshot)) {
+    // 6. 检查快照是否变化
+    if (!is(store.value, nextSnapshot)) {
       store.value = nextSnapshot;
       
-      // 8. 触发重新渲染
-      forceStoredValueUpdate();
+      // 7. 触发重新渲染
+      const fiber = currentlyRenderingFiber;
+      const lane = requestUpdateLane(fiber);
+      
+      const root = enqueueConcurrentRenderForLane(fiber, lane);
+      if (root !== null) {
+        scheduleUpdateOnFiber(root, fiber, lane);
+      }
     }
   };
   
-  // 9. 保存 store
-  hook.memoizedState = {
-    value: snapshot,
-    store,
-  };
-  
-  // 10. 订阅外部数据源
+  // 8. 订阅外部数据源
   if (!store.subscribing) {
-    const unsubscribe = subscribe(store.handleChange);
+    const unsubscribe = subscribe(handleStoreChange);
     store.unsubscribe = unsubscribe;
     store.subscribing = true;
   }
   
+  hook.memoizedState = snapshot;
   return snapshot;
 }
 ```
 
-### updateSyncExternalStore
+### updateSyncExternalStore（更新渲染）
 
 ```javascript
-function updateSyncExternalStore(
-  subscribe: () => () => void,
-  getSnapshot: () => any,
-  getServerSnapshot?: () => any,
-): any {
-  // 1. 获取 Hook
+function updateSyncExternalStore<T>(
+  subscribe: (onStoreChange: () => void) => () => void,
+  getSnapshot: () => T,
+  getServerSnapshot?: () => T,
+): T {
   const hook = updateWorkInProgressHook();
   
-  // 2. 获取 store 实例
-  const prevStore = hook.memoizedState.store;
-  
-  // 3. 获取最新快照
+  // 1. 获取当前快照
   const snapshot = getSnapshot();
   
-  // 4. 检查快照变化
-  const prevSnapshot = prevStore?.value;
-  const hasChanged = !Object.is(prevSnapshot, snapshot);
+  // 2. 获取上次的值
+  const prevSnapshot = hook.memoizedState;
+  
+  // 3. 检查快照变化
+  const hasChanged = !is(prevSnapshot, snapshot);
   
   if (hasChanged) {
-    // 5. 如果快照变化，标记更新
+    // 4. 如果快照变化，标记更新
     markWorkInProgressReceivedUpdate();
   }
   
+  // 5. 返回最新快照
+  hook.memoizedState = snapshot;
   return snapshot;
 }
 ```
 
-### forceStoredValueUpdate（触发更新）
+### rerenderSyncExternalStore（重渲染）
 
 ```javascript
-function forceStoredValueUpdate() {
-  // 1. 创建更新
-  const update = {
-    eventTime: requestEventTime(),
-    lane: requestUpdateLane(currentlyRenderingFiber),
-    action: null,
-    hasEagerState: false,
-    eagerState: null,
-    next: null,
-  };
-  
-  // 2. 调度更新（跳过 shouldComponentUpdate）
-  scheduleUpdateOnFiber(
-    currentlyRenderingFiber,
-    update.lane,
-  );
+function rerenderSyncExternalStore<T>(
+  subscribe: (onStoreChange: () => void) => () => void,
+  getSnapshot: () => T,
+  getServerSnapshot?: () => T,
+): T {
+  // 重渲染时与更新相同
+  return updateSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 }
 ```
 
@@ -219,21 +199,20 @@ function forceStoredValueUpdate() {
 graph TD
     A[useSyncExternalStore] --> B{首次渲染？}
     B -->|是 | C[mountSyncExternalStore]
-    B -->|否 | D[updateSyncExternalStore]
+    C --> D[创建 Store 实例]
+    D --> E[获取初始快照]
+    E --> F[订阅外部数据源]
+    F --> G[返回快照]
     
-    C --> E[创建 Store 实例]
-    E --> F[获取初始快照]
-    F --> G[订阅外部数据源]
-    G --> H[返回快照]
-    
-    D --> I[获取最新快照]
+    B -->|否 | H[updateSyncExternalStore]
+    H --> I[获取最新快照]
     I --> J{快照变化？}
     J -->|是 | K[标记更新]
     J -->|否 | L[返回缓存]
-    K --> H
-    L --> H
+    K --> G
+    L --> G
     
-    M[外部数据变化] --> N[handleChange 触发]
+    M[外部数据变化] --> N[handleStoreChange 触发]
     N --> O[获取新快照]
     O --> P{快照变化？}
     P -->|是 | Q[scheduleUpdateOnFiber]
@@ -243,10 +222,9 @@ graph TD
 
 ## 💡 实战技巧
 
-### 1. 基础使用
+### 1. 订阅浏览器网络状态
 
 ```jsx
-// 订阅浏览器网络状态
 function useOnlineStatus() {
   return useSyncExternalStore(
     // subscribe
@@ -271,22 +249,12 @@ function StatusBar() {
 }
 ```
 
-### 2. 配合 Redux
+### 2. 配合 Redux 使用
 
 ```jsx
 // 配合 Redux store
-function useReduxStore() {
-  const store = useStore(); // Redux store
-  
-  return useSyncExternalStore(
-    // subscribe
-    (onStoreChange) => store.subscribe(onStoreChange),
-    // getSnapshot
-    () => store.getState(),
-  );
-}
+import { useStore } from 'react-redux';
 
-// 配合 selector
 function useSelector(selector) {
   const store = useStore();
   
@@ -299,9 +267,21 @@ function useSelector(selector) {
     () => selector(preloadedState),
   );
 }
+
+// 使用
+function Counter() {
+  const count = useSelector(state => state.count);
+  const dispatch = useDispatch();
+  
+  return (
+    <button onClick={() => dispatch({ type: 'increment' })}>
+      Count: {count}
+    </button>
+  );
+}
 ```
 
-### 3. 配合 Zustand
+### 3. 配合 Zustand 使用
 
 ```jsx
 // Zustand store
@@ -366,28 +346,63 @@ function useLocalStorage(key, initialValue) {
 function ThemeToggle() {
   const [theme, setTheme] = useLocalStorage('theme', 'light');
   
+  const toggleTheme = () => {
+    const newTheme = theme === 'light' ? 'dark' : 'light';
+    localStorage.setItem('theme', JSON.stringify(newTheme));
+  };
+  
   return (
-    <button onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}>
+    <button onClick={toggleTheme}>
       Theme: {theme}
     </button>
   );
 }
 ```
 
-### 5. 防止不必要的订阅
+### 5. 配合第三方库状态
 
 ```jsx
-// 优化：使用 useMemo 缓存 subscribe 函数
-function useOptimizedSyncExternalStore(subscribe, getSnapshot) {
-  // 缓存 subscribe
-  const cachedSubscribe = useMemo(() => {
-    return (onStoreChange) => {
-      const unsubscribe = subscribe(onStoreChange);
-      return unsubscribe;
-    };
-  }, [subscribe]);
+// 自定义 store
+function createStore(initialState) {
+  let state = initialState;
+  const listeners = new Set();
   
-  return useSyncExternalStore(cachedSubscribe, getSnapshot);
+  const subscribe = (callback) => {
+    listeners.add(callback);
+    return () => listeners.delete(callback);
+  };
+  
+  const getSnapshot = () => state;
+  
+  const setState = (updater) => {
+    const newState = typeof updater === 'function' ? updater(state) : updater;
+    if (!Object.is(state, newState)) {
+      state = newState;
+      listeners.forEach(listener => listener());
+    }
+  };
+  
+  return { subscribe, getSnapshot, setState };
+}
+
+// 使用
+const store = createStore({ count: 0 });
+
+function useStoreState() {
+  return useSyncExternalStore(
+    store.subscribe,
+    store.getSnapshot,
+  );
+}
+
+function Counter() {
+  const state = useStoreState();
+  
+  return (
+    <button onClick={() => store.setState(s => ({ count: s.count + 1 }))}>
+      Count: {state.count}
+    </button>
+  );
 }
 ```
 
@@ -482,6 +497,42 @@ function useTheme() {
 }
 ```
 
+### 5. 性能优化
+
+```jsx
+// 缓存 getSnapshot 以避免不必要的更新
+function useOptimizedSelector(selector) {
+  const store = useStore();
+  
+  return useSyncExternalStore(
+    store.subscribe,
+    () => selector(store.getState()),
+    () => selector(preloadedState),
+  );
+}
+
+// 使用 memoization
+function useSelector(selector) {
+  const store = useStore();
+  
+  const getSnapshot = useMemo(
+    () => () => selector(store.getState()),
+    [store, selector],
+  );
+  
+  const getServerSnapshot = useMemo(
+    () => () => selector(preloadedState),
+    [selector],
+  );
+  
+  return useSyncExternalStore(
+    store.subscribe,
+    getSnapshot,
+    getServerSnapshot,
+  );
+}
+```
+
 ## 🔬 与 useState 对比
 
 ### 为什么不用 useState？
@@ -522,6 +573,7 @@ function Component() {
 | SSR 支持 | ❌ 有限 | ✅ 完整 |
 | 外部数据源 | ❌ 需要 useEffect | ✅ 原生支持 |
 | 性能 | ⚠️ 可能需要额外渲染 | ✅ 优化过 |
+| 数据撕裂 | ❌ 可能发生 | ✅ 防止 |
 
 ## 🔬 调试技巧
 
@@ -540,6 +592,9 @@ const wrappedSubscribe = (onStoreChange) => {
     unsubscribe();
   };
 };
+
+// 使用
+const data = useSyncExternalStore(wrappedSubscribe, getSnapshot);
 ```
 
 ### 检查快照变化
@@ -584,6 +639,21 @@ const data = useSyncExternalStore(
 ### Q: useSyncExternalStore 和 useEffect+useState 有什么区别？
 
 **A**: useSyncExternalStore 是同步读取数据，保证并发安全；useEffect+useState 是异步的，可能在并发渲染中出现数据撕裂。
+
+### Q: 如何处理复杂对象？
+
+```jsx
+// 对于复杂对象，使用 memoization
+function useSelector(selector) {
+  const store = useStore();
+  
+  return useSyncExternalStore(
+    store.subscribe,
+    () => selector(store.getState()),
+    () => selector(preloadedState),
+  );
+}
+```
 
 ---
 

@@ -1,6 +1,6 @@
 # useMemo / useCallback 实现
 
-useMemo 和 useCallback 是 React 性能优化的核心 Hook，它们的实现机制几乎完全相同。
+useMemo 和 useCallback 是 React 性能优化的核心 Hook，它们的实现机制相似但用途不同。
 
 ## 📦 模块位置
 
@@ -14,10 +14,12 @@ packages/react-reconciler/src/
 ### useMemo Hook 结构
 
 ```javascript
-// packages/react-reconciler/src/ReactFiberHooks.js
+// useMemo Hook 的 memoizedState 存储 [值, 依赖数组]
+// 结构：[cachedValue, dependencies]
 
+// Hook 结构保持不变
 type Hook = {
-  memoizedState: [mixed, Array<mixed> | null], // [缓存值，依赖数组]
+  memoizedState: any,
   baseState: any,
   baseQueue: Update<any>,
   queue: UpdateQueue<any>,
@@ -25,14 +27,12 @@ type Hook = {
 };
 ```
 
-### Callback Hook 结构
+### useCallback Hook 结构
 
 ```javascript
-// useCallback 本质上存储的是函数
-type Hook = {
-  memoizedState: mixed,    // 缓存的回调函数
-  // ... 其他属性
-};
+// useCallback Hook 的 memoizedState 直接存储回调函数
+// 结构：cachedCallback
+// 依赖数组存储在 Hook.queue.pending 中
 ```
 
 ## 🔬 useMemo 实现
@@ -46,16 +46,23 @@ function mountMemo<T>(
   nextCreate: () => T,
   deps: Array<mixed> | void | null,
 ): T {
-  // 1. 创建 Hook
   const hook = mountWorkInProgressHook();
-  
-  // 2. 解析依赖
   const nextDeps = deps === undefined ? null : deps;
   
-  // 3. 执行创建函数
+  // 执行创建函数
   const nextValue = nextCreate();
   
-  // 4. 保存值和依赖
+  // React 18 StrictMode 下双重执行
+  if (shouldDoubleInvokeUserFnsInHooksDEV) {
+    setIsStrictModeForDevtools(true);
+    try {
+      nextCreate();
+    } finally {
+      setIsStrictModeForDevtools(false);
+    }
+  }
+  
+  // 存储 [值, 依赖数组]
   hook.memoizedState = [nextValue, nextDeps];
   
   return nextValue;
@@ -69,77 +76,51 @@ function updateMemo<T>(
   nextCreate: () => T,
   deps: Array<mixed> | void | null,
 ): T {
-  // 1. 获取当前 Hook
   const hook = updateWorkInProgressHook();
-  
-  // 2. 获取上次的值和依赖
-  const changeQueue = hook.queue;
+  const nextDeps = deps === undefined ? null : deps;
   const prevState = hook.memoizedState;
   
-  // 3. 获取上次的 create 函数和依赖
-  const create = changeQueue !== null ? changeQueue.pending : null;
-  const prevDeps = prevState[1];
-  
-  // 4. 依赖比较
-  if (deps !== null && prevDeps !== null) {
-    // 检查依赖是否变化
-    if (areHookInputsEqual(deps, prevDeps)) {
-      // 依赖没变，返回缓存值
+  // prevState 是 [值, 依赖数组]
+  if (nextDeps !== null) {
+    const prevDeps: Array<mixed> | null = prevState[1];
+    
+    // 使用 Object.is 比较依赖
+    if (areHookInputsEqual(nextDeps, prevDeps)) {
+      // 依赖未变化，返回缓存值
       return prevState[0];
     }
   }
   
-  // 5. 依赖变化，重新计算
+  // 依赖变化，重新计算
   const nextValue = nextCreate();
   
-  // 6. 更新缓存
-  hook.memoizedState = [nextValue, deps];
+  // React 18 StrictMode 下双重执行
+  if (shouldDoubleInvokeUserFnsInHooksDEV) {
+    setIsStrictModeForDevtools(true);
+    try {
+      nextCreate();
+    } finally {
+      setIsStrictModeForDevtools(false);
+    }
+  }
+  
+  // 更新缓存
+  hook.memoizedState = [nextValue, nextDeps];
   
   return nextValue;
 }
 ```
 
-### areHookInputsEqual（依赖比较）
+### rerenderMemo
 
 ```javascript
-function areHookInputsEqual(
-  nextDeps: Array<mixed>,
-  prevDeps: Array<mixed>,
-): boolean {
-  // 1. 检查是否为 null
-  if (prevDeps === null || nextDeps === null) {
-    return false;
-  }
-  
-  // 2. 检查长度
-  if (nextDeps.length !== prevDeps.length) {
-    return false;
-  }
-  
-  // 3. 逐项使用 Object.is 比较
-  for (let i = 0; i < prevDeps.length && i < nextDeps.length; i++) {
-    if (Object.is(nextDeps[i], prevDeps[i])) {
-      continue;
-    }
-    return false;
-  }
-  
-  return true;
+function rerenderMemo<T>(
+  nextCreate: () => T,
+  deps: Array<mixed> | void | null,
+): T {
+  // 重渲染阶段与更新阶段相同
+  return updateMemo(nextCreate, deps);
 }
-```
-
-### Object.is 比较
-
-```javascript
-// Object.is 与 === 的区别
-Object.is(0, -0);        // false
-0 === -0;                // true
-
-Object.is(NaN, NaN);     // true
-NaN === NaN;             // false
-
-Object.is(+0, -0);       // false
-Object.is({}, {});       // false (引用不同)
 ```
 
 ## 🔬 useCallback 实现
@@ -151,24 +132,15 @@ function mountCallback<T>(
   callback: T,
   deps: Array<mixed> | void | null,
 ): T {
-  // 1. 创建 Hook
   const hook = mountWorkInProgressHook();
-  
-  // 2. 解析依赖
   const nextDeps = deps === undefined ? null : deps;
   
-  // 3. 保存回调函数和依赖
+  // 直接存储回调函数
   hook.memoizedState = callback;
-  hook.queue = {
-    pending: null,
-    lane: NoLanes,
-    dispatch: null,
-    lastRenderedReducer: () => {},
-    lastRenderedState: null,
-  };
   
-  // 4. 存储依赖（通过 queue.pending）
-  hook.queue.pending = nextDeps;
+  // 依赖数组存储在 Hook 的 queue.pending 中
+  // 注意：useCallback 不使用 queue，但依赖数组需要存储
+  // 实际实现中依赖数组直接作为 Hook.memoizedState[1] 存储
   
   return callback;
 }
@@ -181,30 +153,106 @@ function updateCallback<T>(
   callback: T,
   deps: Array<mixed> | void | null,
 ): T {
-  // 1. 获取当前 Hook
   const hook = updateWorkInProgressHook();
-  
-  // 2. 解析依赖
   const nextDeps = deps === undefined ? null : deps;
-  
-  // 3. 获取上次的回调和依赖
   const prevState = hook.memoizedState;
-  const prevDeps = hook.queue.pending;
   
-  // 4. 依赖比较
-  if (nextDeps !== null && prevDeps !== null) {
+  // prevState 是 [callback, deps]
+  if (nextDeps !== null) {
+    const prevDeps: Array<mixed> | null = prevState[1];
+    
+    // 依赖比较
     if (areHookInputsEqual(nextDeps, prevDeps)) {
-      // 依赖没变，返回缓存的回调
-      return prevState;
+      // 依赖未变化，返回缓存的回调
+      return prevState[0];
     }
   }
   
-  // 5. 依赖变化，返回新回调
-  hook.memoizedState = callback;
-  hook.queue.pending = nextDeps;
+  // 依赖变化，返回新回调
+  hook.memoizedState = [callback, nextDeps];
   
   return callback;
 }
+```
+
+### rerenderCallback
+
+```javascript
+function rerenderCallback<T>(
+  callback: T,
+  deps: Array<mixed> | void | null,
+): T {
+  // 重渲染阶段与更新阶段相同
+  return updateCallback(callback, deps);
+}
+```
+
+## 🔍 依赖比较实现
+
+### areHookInputsEqual
+
+```javascript
+function areHookInputsEqual(
+  nextDeps: Array<mixed>,
+  prevDeps: Array<mixed> | null,
+): boolean {
+  if (__DEV__) {
+    if (ignorePreviousDependencies) {
+      // 热重载时强制重新执行
+      return false;
+    }
+  }
+
+  if (prevDeps === null) {
+    if (__DEV__) {
+      console.error(
+        '%s received a final argument during this render, but not during ' +
+          'the previous render. Even though the final argument is optional, ' +
+          'its type cannot change between renders.',
+        currentHookNameInDev,
+      );
+    }
+    return false;
+  }
+
+  if (__DEV__) {
+    // 开发模式下检查长度变化
+    if (nextDeps.length !== prevDeps.length) {
+      console.error(
+        'The final argument passed to %s changed size between renders. The ' +
+          'order and size of this array must remain constant.\n\n' +
+          'Previous: %s\n' +
+          'Incoming: %s',
+        currentHookNameInDev,
+        `[${prevDeps.join(', ')}]`,
+        `[${nextDeps.join(', ')}]`,
+      );
+    }
+  }
+
+  // 逐项使用 Object.is 比较
+  for (let i = 0; i < prevDeps.length && i < nextDeps.length; i++) {
+    if (is(nextDeps[i], prevDeps[i])) {
+      continue;
+    }
+    return false;
+  }
+  return true;
+}
+```
+
+### Object.is 比较
+
+```javascript
+// 使用 React 内部的 is 函数（Object.is 的 polyfill）
+// 与 === 的区别：
+is(0, -0);        // false
+0 === -0;         // true
+
+is(NaN, NaN);     // true
+NaN === NaN;      // false
+
+is({}, {});       // false (引用不同)
 ```
 
 ## 📊 完整流程图
@@ -214,15 +262,15 @@ graph TD
     A[useMemo/Callback] --> B[首次渲染？]
     B -->|是 | C[mount 阶段]
     C --> D[创建 Hook]
-    D --> E[执行 nextCreate]
-    E --> F[保存值和依赖]
+    D --> E[执行 nextCreate 或存储 callback]
+    E --> F[存储 [值, 依赖] 或 [callback, 依赖]]
     F --> G[返回值]
     
     B -->|否 | H[update 阶段]
     H --> I[获取上次依赖]
     I --> J{依赖变化？}
     J -->|否 | K[返回缓存值]
-    J -->|是 | L[重新执行 nextCreate]
+    J -->|是 | L[重新执行 nextCreate 或返回新 callback]
     L --> M[更新缓存]
     M --> G
     K --> G
@@ -239,7 +287,7 @@ const sortedList = useMemo(() => {
 }, [list]);
 
 // ❌ 不推荐：简单计算不需要 memo
-const sum = useMemo(() => a + b, [a, b]);  // 过度优化
+const doubled = useMemo(() => count * 2, [count]);  // 过度优化
 ```
 
 ### 2. 传递给子组件
@@ -263,73 +311,41 @@ return (
 ```jsx
 // 父组件
 function Parent({ items }) {
-  const handleClick = useCallback((id) => {
-    console.log('Clicked:', id);
+  const [count, setCount] = useState(0);
+  
+  // 稳定的 memo
+  const sortedItems = useMemo(() => {
+    return items.slice().sort();
+  }, [items]);
+  
+  // 稳定的 callback
+  const handleClick = useCallback((item) => {
+    console.log(item);
   }, []);
   
   return (
-    <div>
-      {items.map(item => (
-        <MemoizedItem
-          key={item.id}
-          item={item}
-          onClick={handleClick}
-        />
-      ))}
-    </div>
+    <>
+      <button onClick={() => setCount(c => c + 1)}>{count}</button>
+      <MemoizedList items={sortedItems} onClick={handleClick} />
+    </>
   );
 }
 
 // 子组件
-const MemoizedItem = React.memo(function Item({ item, onClick }) {
+const MemoizedList = React.memo(function List({ items, onClick }) {
   return (
-    <div onClick={() => onClick(item.id)}>
-      {item.name}
-    </div>
+    <ul>
+      {items.map(item => (
+        <li key={item.id} onClick={() => onClick(item)}>
+          {item.name}
+        </li>
+      ))}
+    </ul>
   );
 });
 ```
 
 ### 4. 依赖项陷阱
-
-```jsx
-// ❌ 错误：遗漏依赖
-function Component({ userId }) {
-  const fetchUser = useCallback(() => {
-    fetch(`/api/users/${userId}`);  // userId 变化但函数不更新
-  }, []);  // 空数组
-}
-
-// ✅ 正确：包含所有依赖
-function Component({ userId }) {
-  const fetchUser = useCallback(() => {
-    fetch(`/api/users/${userId}`);
-  }, [userId]);
-}
-
-// ✅ 或使用函数更新
-function Component({ userId }) {
-  const fetchUser = useCallback(() => {
-    // 使用闭包获取最新 userId
-  }, []);
-}
-```
-
-## ⚠️ 注意事项
-
-### 1. 不要过度优化
-
-```jsx
-// ❌ 不推荐：简单值不需要 memo
-const name = useMemo(() => 'John', []);  // 没必要
-
-// ✅ 推荐：只有计算昂贵时才使用
-const sortedData = useMemo(() => {
-  return data.slice().sort(compare);
-}, [data]);
-```
-
-### 2. 依赖数组的陷阱
 
 ```jsx
 // ❌ 错误：对象作为依赖
@@ -360,6 +376,44 @@ function Component() {
 }
 ```
 
+### 5. React 18 StrictMode 双重执行
+
+```jsx
+// React 18 StrictMode 下，useMemo 的创建函数会执行两次
+const expensiveValue = useMemo(() => {
+  console.log('Computing...');  // 会打印两次
+  return expensiveCalculation(data);
+}, [data]);
+
+// 确保创建函数是纯函数，无副作用
+```
+
+## ⚠️ 注意事项
+
+### 1. 不要过度优化
+
+```jsx
+// ❌ 不推荐：简单值不需要 memo
+const name = useMemo(() => 'John', []);
+
+// ✅ 推荐：只有计算昂贵时才使用
+const sortedData = useMemo(() => {
+  return hugeData.slice().sort(compare);
+}, [hugeData]);
+```
+
+### 2. 依赖数组的陷阱
+
+```jsx
+// ❌ 错误：函数作为依赖
+const handler = () => {};
+useMemo(() => {}, [handler]);  // 每次都会重新计算
+
+// ✅ 正确：使用 useCallback 稳定函数
+const handler = useCallback(() => {}, []);
+useMemo(() => {}, [handler]);
+```
+
 ### 3. useCallback 的 stale closure
 
 ```jsx
@@ -368,18 +422,11 @@ function Component() {
   const [count, setCount] = useState(0);
   
   const handleClick = useCallback(() => {
-    console.log(count);  // 总是 0
+    console.log(count);  // 总是初始值
   }, []);
-  
-  return (
-    <>
-      <p>{count}</p>
-      <button onClick={handleClick}>Increment</button>
-    </>
-  );
 }
 
-// ✅ 正确：使用 ref 或函数更新
+// ✅ 正确：包含依赖或使用 ref
 function Component() {
   const [count, setCount] = useState(0);
   const countRef = useRef(count);
@@ -388,13 +435,6 @@ function Component() {
   const handleClick = useCallback(() => {
     console.log(countRef.current);  // 最新值
   }, []);
-  
-  return (
-    <>
-      <p>{count}</p>
-      <button onClick={() => setCount(c => c + 1)}>Increment</button>
-    </>
-  );
 }
 ```
 
@@ -402,10 +442,10 @@ function Component() {
 
 ### 使用场景区别
 
-| Hook | 适用场景 | 返回值 |
-|------|---------|--------|
-| useMemo | 计算结果缓存 | 值 |
-| useCallback | 函数引用稳定 | 函数 |
+| Hook | 适用场景 | 返回值 | 存储结构 |
+|------|---------|--------|----------|
+| useMemo | 计算结果缓存 | 值 | [值, 依赖] |
+| useCallback | 函数引用稳定 | 函数 | [函数, 依赖] |
 
 ### 等价关系
 
@@ -511,16 +551,25 @@ function ExpensiveComponent({ data }) {
 ```javascript
 // 自定义 Hook 调试
 function useDebugMemo(create, deps) {
-  const result = useMemo(() => {
-    console.log('Memo changed, deps:', deps);
-    return create();
-  }, deps);
+  const prevDepsRef = useRef();
   
-  return result;
+  useEffect(() => {
+    if (prevDepsRef.current) {
+      const changed = deps.some((dep, i) => 
+        !Object.is(dep, prevDepsRef.current[i])
+      );
+      if (changed) {
+        console.log('Deps changed:', {
+          prev: prevDepsRef.current,
+          next: deps,
+        });
+      }
+    }
+    prevDepsRef.current = deps;
+  });
+  
+  return useMemo(create, deps);
 }
-
-// 使用
-const value = useDebugMemo(() => expensive(), [data]);
 ```
 
 ## 🐛 常见问题
@@ -560,6 +609,19 @@ const ref = useRef(null);
 useEffect(() => {
   ref.current = expensiveCalculation();
 }, []);
+```
+
+### Q: 为什么 useMemo 在 StrictMode 下执行两次？
+
+**A**: React 18 StrictMode 会双重调用函数帮助检测副作用。
+
+```jsx
+const value = useMemo(() => {
+  console.log('Computing...');  // 会打印两次
+  return expensiveCalculation(data);
+}, [data]);
+
+// 确保创建函数是纯函数
 ```
 
 ---

@@ -16,21 +16,30 @@ packages/react-reconciler/src/
 ```javascript
 // packages/react-reconciler/src/ReactFiberHooks.js
 
-type Hook = {
-  memoizedState: any,     // 当前状态
-  baseState: any,         // 基础状态（用于跳过更新）
-  baseQueue: Update<any>, // 基础更新队列
-  queue: UpdateQueue<any>, // 更新队列
-  next: Hook | null,      // 下一个 Hook
+export type Update<S, A> = {
+  lane: Lane,
+  revertLane: Lane,        // 新增：用于乐观更新的回滚车道
+  action: A,
+  hasEagerState: boolean,
+  eagerState: S | null,
+  next: Update<S, A>,
+  gesture: null | ScheduledGesture, // enableGestureTransition
 };
 
-type Update<S> = {
-  eventTime: number,      // 事件时间
-  lane: Lane,             // 优先级
-  action: A,              // 更新动作（如 setState 的参数）
-  hasEagerState: boolean, // 是否有 eager state
-  eagerState: S | null,   // eager state（优化用）
-  next: Update<S>,        // 下一个更新
+export type UpdateQueue<S, A> = {
+  pending: Update<S, A> | null,
+  lanes: Lanes,           // 新增：用于跟踪所有相关的车道
+  dispatch: (A => mixed) | null,
+  lastRenderedReducer: ((S, A) => S) | null,
+  lastRenderedState: S | null,
+};
+
+export type Hook = {
+  memoizedState: any,
+  baseState: any,
+  baseQueue: Update<any, any> | null,
+  queue: any,
+  next: Hook | null,
 };
 ```
 
@@ -74,7 +83,7 @@ function mountState<S>(
   // 3. 创建更新队列
   const queue = {
     pending: null,          // 环状链表
-    lane: NoLanes,          // 优先级
+    lanes: NoLanes,         // 新增：跟踪所有相关的车道
     dispatch: null,         // dispatch 函数
     lastRenderedReducer: basicStateReducer,
     lastRenderedState: initialState,
@@ -85,7 +94,7 @@ function mountState<S>(
   hook.baseState = initialState;
   
   // 4. 创建 dispatch 函数
-  const dispatch = (queue.dispatch = dispatchAction.bind(
+  const dispatch = (queue.dispatch = dispatchSetState.bind(
     null,
     currentlyRenderingFiber,
     queue
@@ -108,7 +117,7 @@ function updateState<S>(
   const queue = hook.queue;
   
   // 3. 处理更新
-  return updateReducer(queue, basicStateReducer);
+  return updateReducer(basicStateReducer, initialState);
 }
 ```
 
@@ -116,127 +125,281 @@ function updateState<S>(
 
 ```javascript
 function updateReducer<S, I, A>(
-  queue: UpdateQueue<S, I, A>,
-  reducer: (S, I) => S,
+  reducer: (S, A) => S,
+  initialArg: I,
+  init?: I => S,
 ): [S, Dispatch<A>] {
-  // 1. 获取当前 Hook
   const hook = updateWorkInProgressHook();
-  
-  // 2. 获取待处理的更新
-  let first = queue.pending;
-  
-  if (first !== null) {
-    // 有 pending 更新
-    const newQueue = {
-      ...queue,
-      pending: null,
-    };
-    hook.queue = newQueue;
-    
-    // 获取第一个更新
-    first = first.next;
-    
-    let newState = hook.baseState;
+  return updateReducerImpl(hook, ((currentHook: any): Hook), reducer);
+}
+
+function updateReducerImpl<S, A>(
+  hook: Hook,
+  current: Hook,
+  reducer: (S, A) => S,
+): [S, Dispatch<A>] {
+  const queue = hook.queue;
+
+  if (queue === null) {
+    throw new Error(
+      'Should have a queue. You are likely calling Hooks conditionally, ' +
+        'which is not allowed. (https://react.dev/link/invalid-hook-call)',
+    );
+  }
+
+  queue.lastRenderedReducer = reducer;
+
+  // The last rebase update that is NOT part of the base state.
+  let baseQueue = hook.baseQueue;
+
+  // The last pending update that hasn't been processed yet.
+  const pendingQueue = queue.pending;
+  if (pendingQueue !== null) {
+    // We have new updates that haven't been processed yet.
+    // We'll add them to the base queue.
+    if (baseQueue !== null) {
+      // Merge the pending queue and the base queue.
+      const baseFirst = baseQueue.next;
+      const pendingFirst = pendingQueue.next;
+      baseQueue.next = pendingFirst;
+      pendingQueue.next = baseFirst;
+    }
+    current.baseQueue = baseQueue = pendingQueue;
+    queue.pending = null;
+  }
+
+  const baseState = hook.baseState;
+  if (baseQueue === null) {
+    // If there are no pending updates, then the memoized state should be the
+    // same as the base state.
+    hook.memoizedState = baseState;
+  } else {
+    // We have a queue to process.
+    const first = baseQueue.next;
+    let newState = baseState;
+
     let newBaseState = null;
     let newBaseQueueFirst = null;
-    let newBaseQueueLast = null;
-    
-    // 3. 遍历更新队列
+    let newBaseQueueLast: Update<S, A> | null = null;
     let update = first;
+    let didReadFromEntangledAsyncAction = false;
     do {
-      const updateLane = update.lane;
-      
-      // 4. 检查优先级
-      if (!isSubsetOfLanes(renderLanes, updateLane)) {
-        // 优先级不够，跳过
-        const clone = cloneUpdate(update);
-        
-        if (newBaseQueueLast === null) {
-          newBaseQueueFirst = clone;
-          newBaseQueueLast = clone;
-        } else {
-          newBaseQueueLast.next = clone;
-          newBaseQueueLast = clone;
+      // An extra OffscreenLane bit is added to updates that were made to
+      // a hidden tree, so that we can distinguish them from updates that were
+      // already there when the tree was hidden.
+      const updateLane = removeLanes(update.lane, OffscreenLane);
+      const isHiddenUpdate = updateLane !== update.lane;
+
+      // Check if this update was made while the tree was hidden. If so, then
+      // it's not a "base" update and we should disregard the extra base lanes
+      // that were added to renderLanes when we entered the Offscreen tree.
+      let shouldSkipUpdate = isHiddenUpdate
+        ? !isSubsetOfLanes(getWorkInProgressRootRenderLanes(), updateLane)
+        : !isSubsetOfLanes(renderLanes, updateLane);
+
+      if (enableGestureTransition && updateLane === GestureLane) {
+        // This is a gesture optimistic update. It should only be considered as part of the
+        // rendered state while rendering the gesture lane and if the rendering the associated
+        // ScheduledGesture.
+        const scheduledGesture = update.gesture;
+        if (scheduledGesture !== null) {
+          if (scheduledGesture.count === 0 && !scheduledGesture.committing) {
+            // This gesture has already been cancelled. We can clean up this update.
+            update = update.next;
+            continue;
+          } else if (!isGestureRender(renderLanes)) {
+            shouldSkipUpdate = true;
+          } else {
+            const root: FiberRoot | null = getWorkInProgressRoot();
+            if (root === null) {
+              throw new Error(
+                'Expected a work-in-progress root. This is a bug in React. Please file an issue.',
+              );
+            }
+            // We assume that the currently rendering gesture is the one first in the queue.
+            shouldSkipUpdate = root.pendingGestures !== scheduledGesture;
+          }
         }
-        
-        // 标记父级需要重新渲染
-        markUpdateLaneFromFiberToRoot(currentlyRenderingFiber, updateLane);
-      } else {
-        // 5. 优先级足够，应用更新
-        if (newBaseQueueLast !== null) {
-          // 前面有跳过的更新，也要跳过后面的
-          const clone = cloneUpdate(update);
-          newBaseQueueLast.next = clone;
-          newBaseQueueLast = clone;
+      }
+
+      if (shouldSkipUpdate) {
+        // Priority is insufficient. Skip this update.
+        const clone: Update<S, A> = {
+          lane: updateLane,
+          revertLane: update.revertLane,
+          gesture: update.gesture,
+          action: update.action,
+          hasEagerState: update.hasEagerState,
+          eagerState: update.eagerState,
+          next: (null: any),
+        };
+        if (newBaseQueueLast === null) {
+          newBaseQueueFirst = newBaseQueueLast = clone;
+          newBaseState = newState;
         } else {
-          // 应用更新
-          const action = update.action;
+          newBaseQueueLast = newBaseQueueLast.next = clone;
+        }
+        // Update the remaining priority in the queue.
+        currentlyRenderingFiber.lanes = mergeLanes(
+          currentlyRenderingFiber.lanes,
+          updateLane,
+        );
+        markSkippedUpdateLanes(updateLane);
+      } else {
+        // This update does have sufficient priority.
+        if (newBaseQueueLast !== null) {
+          // If there were earlier updates that were skipped, we need to
+          // leave this update in the queue so it can be rebased later.
+          const clone: Update<S, A> = {
+            lane: NoLane,
+            revertLane: NoLane,
+            gesture: null,
+            action: update.action,
+            hasEagerState: update.hasEagerState,
+            eagerState: update.eagerState,
+            next: (null: any),
+          };
+          newBaseQueueLast = newBaseQueueLast.next = clone;
+        }
+
+        // Process this update.
+        const action = update.action;
+        if (update.hasEagerState) {
+          // If this update is a state update and was processed eagerly,
+          // we can use the eagerly computed state
+          newState = ((update.eagerState: any): S);
+        } else {
           newState = reducer(newState, action);
         }
       }
-      
       update = update.next;
     } while (update !== null && update !== first);
-    
-    // 6. 更新 baseState
+
     if (newBaseQueueLast === null) {
       newBaseState = newState;
     } else {
-      newBaseQueueLast.next = newBaseQueueFirst;
+      newBaseQueueLast.next = (newBaseQueueFirst: any);
     }
-    
+
+    // Mark that the fiber performed work, but only if the new state is
+    // different from the current state.
+    if (!is(newState, hook.memoizedState)) {
+      markWorkInProgressReceivedUpdate();
+    }
+
+    hook.memoizedState = newState;
     hook.baseState = newBaseState;
     hook.baseQueue = newBaseQueueLast;
-    
-    // 7. 更新 memoizedState
-    hook.memoizedState = newState;
+
+    queue.lastRenderedState = newState;
   }
-  
-  // 8. 返回结果
-  return [hook.memoizedState, queue.dispatch];
+
+  if (baseQueue === null) {
+    // `queue.lanes` is used for entangling transitions. We can set it back to
+    // zero once the queue is empty.
+    queue.lanes = NoLanes;
+  }
+
+  const dispatch: Dispatch<A> = (queue.dispatch: any);
+  return [hook.memoizedState, dispatch];
 }
 ```
 
-### dispatchAction（触发更新）
+### dispatchSetState（触发更新）
 
 ```javascript
-function dispatchAction<S, I, A>(
+function dispatchSetState<S, A>(
   fiber: Fiber,
-  queue: UpdateQueue<S, I, A>,
+  queue: UpdateQueue<S, A>,
   action: A,
 ): void {
-  // 1. 创建 Update 对象
-  const update = {
-    eventTime: requestEventTime(),
-    lane: requestUpdateLane(fiber),
+  if (__DEV__) {
+    // using a reference to `arguments` bails out of GCC optimizations which affect function arity
+    const args = arguments;
+    if (typeof args[3] === 'function') {
+      console.error(
+        "State updates from the useState() and useReducer() Hooks don't support the " +
+          'second callback argument. To execute a side effect after ' +
+          'rendering, declare it in the component body with useEffect().',
+      );
+    }
+  }
+
+  const lane = requestUpdateLane(fiber);
+  const didScheduleUpdate = dispatchSetStateInternal(
+    fiber,
+    queue,
+    action,
+    lane,
+  );
+  if (didScheduleUpdate) {
+    startUpdateTimerByLane(lane, 'setState()', fiber);
+  }
+  markUpdateInDevTools(fiber, lane, action);
+}
+
+function dispatchSetStateInternal<S, A>(
+  fiber: Fiber,
+  queue: UpdateQueue<S, A>,
+  action: A,
+  lane: Lane,
+): boolean {
+  const update: Update<S, A> = {
+    lane,
+    revertLane: NoLane,
+    gesture: null,
     action,
     hasEagerState: false,
     eagerState: null,
-    next: null,
+    next: (null: any),
   };
-  
-  // 2. 优化：eager state（避免不必要的渲染）
+
   if (isRenderPhaseUpdate(fiber)) {
-    // 渲染阶段的更新，特殊处理
-    enqueueConcurrentHookUpdate(queue, update);
+    enqueueRenderPhaseUpdate(queue, update);
   } else {
-    // 3. 添加到环状链表
-    const pending = queue.pending;
-    
-    if (pending === null) {
-      // 第一个更新
-      update.next = update;  // 指向自己
-    } else {
-      // 插入到链表
-      update.next = pending.next;
-      pending.next = update;
+    const alternate = fiber.alternate;
+    if (
+      fiber.lanes === NoLanes &&
+      (alternate === null || alternate.lanes === NoLanes)
+    ) {
+      // The queue is currently empty, which means we can eagerly compute the
+      // next state before entering the render phase.
+      const lastRenderedReducer = queue.lastRenderedReducer;
+      if (lastRenderedReducer !== null) {
+        let prevDispatcher = null;
+        if (__DEV__) {
+          prevDispatcher = ReactSharedInternals.H;
+          ReactSharedInternals.H = InvalidNestedHooksDispatcherOnUpdateInDEV;
+        }
+        try {
+          const currentState: S = (queue.lastRenderedState: any);
+          const eagerState = lastRenderedReducer(currentState, action);
+          // Stash the eagerly computed state
+          update.hasEagerState = true;
+          update.eagerState = eagerState;
+          if (is(eagerState, currentState)) {
+            // Fast path. We can bail out without scheduling React to re-render.
+            enqueueConcurrentHookUpdateAndEagerlyBailout(fiber, queue, update);
+            return false;
+          }
+        } catch (error) {
+          // Suppress the error. It will throw again in the render phase.
+        } finally {
+          if (__DEV__) {
+            ReactSharedInternals.H = prevDispatcher;
+          }
+        }
+      }
     }
-    
-    queue.pending = update;  // 更新 pending 指针
-    
-    // 4. 调度更新
-    scheduleUpdateOnFiber(fiber, update.lane);
+
+    const root = enqueueConcurrentHookUpdate(fiber, queue, update, lane);
+    if (root !== null) {
+      scheduleUpdateOnFiber(root, fiber, lane);
+      entangleTransitionUpdate(root, queue, lane);
+      return true;
+    }
   }
+  return false;
 }
 ```
 
@@ -246,41 +409,39 @@ function dispatchAction<S, I, A>(
 
 ```javascript
 function mountReducer<S, I, A>(
-  reducer: (S, I) => S,
+  reducer: (S, A) => S,
   initialArg: I,
-  init?: (I) => S,
+  init?: I => S,
 ): [S, Dispatch<A>] {
-  // 1. 创建 Hook
   const hook = mountWorkInProgressHook();
-  
-  // 2. 计算初始状态
   let initialState;
   if (init !== undefined) {
     initialState = init(initialArg);
+    if (shouldDoubleInvokeUserFnsInHooksDEV) {
+      setIsStrictModeForDevtools(true);
+      try {
+        init(initialArg);
+      } finally {
+        setIsStrictModeForDevtools(false);
+      }
+    }
   } else {
-    initialState = initialArg;
+    initialState = ((initialArg: any): S);
   }
-  
-  // 3. 创建队列
-  const queue = {
+  hook.memoizedState = hook.baseState = initialState;
+  const queue: UpdateQueue<S, A> = {
     pending: null,
-    lane: NoLanes,
+    lanes: NoLanes,        // 新增：跟踪所有相关的车道
     dispatch: null,
     lastRenderedReducer: reducer,
-    lastRenderedState: initialState,
+    lastRenderedState: (initialState: any),
   };
-  
   hook.queue = queue;
-  hook.memoizedState = initialState;
-  hook.baseState = initialState;
-  
-  // 4. 创建 dispatch
-  const dispatch = (queue.dispatch = dispatchReducerAction.bind(
+  const dispatch: Dispatch<A> = (queue.dispatch = (dispatchReducerAction.bind(
     null,
     currentlyRenderingFiber,
-    queue
-  ));
-  
+    queue,
+  ): any));
   return [hook.memoizedState, dispatch];
 }
 ```
@@ -288,13 +449,47 @@ function mountReducer<S, I, A>(
 ### dispatchReducerAction
 
 ```javascript
-function dispatchReducerAction<S, I, A>(
+function dispatchReducerAction<S, A>(
   fiber: Fiber,
-  queue: UpdateQueue<S, I, A>,
+  queue: UpdateQueue<S, A>,
   action: A,
 ): void {
-  // 调用通用的 dispatchAction
-  dispatchAction(fiber, queue, action);
+  if (__DEV__) {
+    // using a reference to `arguments` bails out of GCC optimizations which affect function arity
+    const args = arguments;
+    if (typeof args[3] === 'function') {
+      console.error(
+        "State updates from the useState() and useReducer() Hooks don't support the " +
+          'second callback argument. To execute a side effect after ' +
+          'rendering, declare it in the component body with useEffect().',
+      );
+    }
+  }
+
+  const lane = requestUpdateLane(fiber);
+
+  const update: Update<S, A> = {
+    lane,
+    revertLane: NoLane,
+    gesture: null,
+    action,
+    hasEagerState: false,
+    eagerState: null,
+    next: (null: any),
+  };
+
+  if (isRenderPhaseUpdate(fiber)) {
+    enqueueRenderPhaseUpdate(queue, update);
+  } else {
+    const root = enqueueConcurrentHookUpdate(fiber, queue, update, lane);
+    if (root !== null) {
+      startUpdateTimerByLane(lane, 'dispatch()', fiber);
+      scheduleUpdateOnFiber(root, fiber, lane);
+      entangleTransitionUpdate(root, queue, lane);
+    }
+  }
+
+  markUpdateInDevTools(fiber, lane, action);
 }
 ```
 
@@ -313,7 +508,7 @@ graph TD
     I --> J[scheduleUpdateOnFiber]
     J --> K[开始渲染]
     K --> L[updateState]
-    L --> M[updateReducer]
+    L --> M[updateReducerImpl]
     M --> N[遍历更新队列]
     N --> O{优先级够？}
     O -->|是 | P[应用 reducer]
@@ -470,14 +665,14 @@ printHooks(fiber.child);
 
 ```javascript
 // 开发模式下添加日志
-const originalDispatchAction = dispatchAction;
-dispatchAction = function(fiber, queue, action) {
-  console.group('dispatchAction');
+const originalDispatchSetState = dispatchSetState;
+dispatchSetState = function(fiber, queue, action) {
+  console.group('dispatchSetState');
   console.log('Fiber:', fiber.type);
   console.log('Action:', action);
   console.log('Lane:', requestUpdateLane(fiber));
   
-  const result = originalDispatchAction(fiber, queue, action);
+  const result = originalDispatchSetState(fiber, queue, action);
   
   console.groupEnd();
   return result;
